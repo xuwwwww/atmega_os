@@ -1,7 +1,7 @@
 MCU      ?= atmega328p
 F_CPU    ?= 16000000UL
 TARGET   ?= build/atmega_os
-SRC      := src/main.c
+SRC 	  := src/main.c src/timer.c
 BUILD_DIR := build
 
 CC       := avr-gcc
@@ -12,7 +12,7 @@ AVRDUDE  := avrdude
 CFLAGS   := -std=gnu11 -Os -Wall -Wextra -mmcu=$(MCU) -DF_CPU=$(F_CPU)
 LDFLAGS  := -mmcu=$(MCU)
 
-OBJ      := $(BUILD_DIR)/main.o
+OBJ := $(SRC:src/%.c=$(BUILD_DIR)/%.o)
 ELF      := $(TARGET).elf
 HEX      := $(TARGET).hex
 
@@ -28,7 +28,7 @@ all: $(HEX) size
 $(BUILD_DIR):
 	mkdir -p $@
 
-$(OBJ): $(SRC) | $(BUILD_DIR)
+$(BUILD_DIR)/%.o: src/%.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
 $(ELF): $(OBJ)
