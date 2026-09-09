@@ -1,76 +1,159 @@
 # ATmega_OS
 
-這是一個用來學習 AVR bare-metal 與簡單作業系統核心概念的練習專案。
+這是一個用來學習 AVR bare-metal 與作業系統核心概念的專案。目前目標板是：
 
-目前的最小核心會：
+- Arduino Uno Type-C 相容板
+- ATmega328P 相容核心（本板為 LGT8F328P 類相容晶片），16 MHz
+- UART0，115200 baud，8-N-1
 
-- 使用 Timer0 每 1 ms 增加一次系統 tick
-- 在主迴圈中每 500 ms 切換一次 PB5
-- 產生可燒錄到 ATmega328P 的 ELF 與 Intel HEX 檔案
+目前已有：
 
-預設假設：`ATmega328P`、`16 MHz`。如果你的晶片或時脈不同，請在 `make` 時覆寫 `MCU` 與 `F_CPU`。
+- Timer2：預設每 0.5 ms 產生 scheduler tick，可在 build 時調整
+- stackful preemptive scheduler：每個 task 有獨立 SRAM stack
+- 4 級 fixed-priority scheduling，同優先權 task 使用 round-robin
+- AVR assembly context switch：保存 r0-r31、SREG 與 stack pointer
+- task state：READY、RUNNING、SLEEPING、BLOCKED、TERMINATED
+- `task_sleep(ms)` 與 wrap-safe wake time
+- idle task：保證 scheduler 永遠有可執行的 context
+- task entry 可以 return，經預置 return address 自動進入 `task_exit()`
+- `task_restart(index)` 可重建已 TERMINATED task 的初始 stack frame
+- compact 16-byte TCB：priority、stack metadata 與 timed-wait cleanup
+- build-time Huffman fixed logs：AVR 只傳壓縮 frame，筆電 monitor 解碼
+- LED task
+- UART RX/TX interrupt 與各 32-byte ring buffer
+- 3-byte counting semaphore 與 8-task waiter bitmap
+- 4-byte non-recursive mutex：owner validation、priority inheritance 與 handoff
+- semaphore、mutex 與 UART receive blocking timeout
+- 固定容量 message queue：FIFO、try、blocking 與 timeout API
+- 12-byte event flags：wait-any、wait-all、auto-clear、timeout 與 ISR set
+- UART shell task：查 uptime、task 狀態、stack 水位、控制 LED 與 restart task
+- 4-byte stack guard、UART panic frame、`.noinit` panic record 與 software reboot
+- one-shot/periodic software timer 與 deferred callback timer-service task
 
-## 1. 開啟 WSL 與進入專案
+## 專案結構
 
-在 Windows PowerShell 執行：
+```text
+src/
+├── drivers/        硬體驅動，例如 UART
+├── kernel/         timer 與 scheduler
+├── tasks/          使用核心服務的工作
+└── main.c          初始化與 task 註冊
+tools/
+└── serial-monitor.ps1
+```
 
-```powershell
+每個 task 依需求配置固定 SRAM stack，並以無限迴圈執行。task 呼叫
+`task_yield()` 後，assembly 會保存 CPU context、切換 SP，再恢復下一個
+task。現在是 0.5 ms time slice 的 fixed-priority preemptive scheduling；
+同優先權之間使用 round-robin。Timer2 ISR 可以搶占沒有主動呼叫
+`task_yield()` 的 task。`task_yield()` 與
+`task_sleep()` 仍可用於提早交出 CPU。
+
+UART ISR 只在硬體與 ring buffer 之間搬移 byte，並 give RX semaphore；echo
+task 沒資料時會進入 BLOCKED，不占 time slice。收到 byte 後 ISR 將它改回
+READY，真正的 echo 仍由 task context 完成。
+
+記憶體配置與 context switch 細節請見
+[`docs/memory-and-context-switch.md`](docs/memory-and-context-switch.md)。
+Preemptive tick 與同步原語路線請見
+[`docs/preemptive-scheduler.md`](docs/preemptive-scheduler.md)。
+Huffman build pipeline 與 UART framing 請見
+[`docs/huffman-uart.md`](docs/huffman-uart.md)。
+Timer 選擇、頻率與桌面 OS 的差異請見
+[`docs/timers.md`](docs/timers.md)。
+Message queue 結構與同步流程請見
+[`docs/message-queue.md`](docs/message-queue.md)。
+目前整個 OS、event flags、software timer、shell 與 SRAM 的逐段教學請見
+[`docs/os-guide.md`](docs/os-guide.md)。
+
+## 在 WSL 編譯
+
+```bash
 wsl.exe -d Ubuntu-22.04
+cd /mnt/d/ATmega_OS
+make clean all
 ```
 
-進入 Ubuntu 後，Windows 的 `D:\ATmega_OS` 會掛載為：
+預設 `KERNEL_TICK_HZ=2000`，也就是 0.5 ms time slice。若要切回 1 ms：
+
+```bash
+make clean all KERNEL_TICK_HZ=1000UL
+make upload KERNEL_TICK_HZ=1000UL
+```
+
+提高 tick rate 會降低最壞排程延遲，但 context save、scheduler 掃描與 ISR
+也會更頻繁。目前 2 kHz 已通過實機測試；`timer_millis()` 仍每一個真正的
+1 ms 才加一，所以既有 sleep 時間不受影響。
+
+四個常駐 task stack 也能在 build 時各自設定：
+
+```bash
+make clean all \
+  LED_STACK_SIZE=160 \
+  SHELL_STACK_SIZE=224 \
+  TIMER_SERVICE_STACK_SIZE=160 \
+  IDLE_STACK_SIZE=128
+```
+
+每個值必須大於初始 context frame 的 37 bytes，且不超過 255。不要把
+watermark 的 `unused == 0` 當成最佳化目標；0 代表沒有任何安全餘裕，也
+無法分辨 stack 是否已經越界。先用最壞 workload 測量，再保留至少 16～32
+bytes margin。
+
+輸出檔案：
+
+- `build/atmega_os.elf`：包含符號資訊，適合除錯
+- `build/atmega_os.hex`：燒錄到晶片的映像
+
+Makefile 使用已安裝在 `D:\CodexHome\runtime\toolchains\Microchip.ATmega_DFP.3.6.299` 的官方 Microchip Device Family Pack。
+
+## 從 WSL 燒錄
+
+這塊 FIREPHX USB-Serial 在 WSL USB passthrough 下無法穩定傳輸，因此 USB 保持在 Windows，由 WSL 直接呼叫 Windows AVRDUDE：
 
 ```bash
 cd /mnt/d/ATmega_OS
+make upload
 ```
 
-## 2. 確認工具鏈
+預設使用 `COM6`。若 Windows 之後分配其他 COM port：
 
 ```bash
-avr-gcc --version
-avr-objcopy --version
-make --version
-avrdude --version
+make upload PORT=COM7
 ```
 
-## 3. 編譯
+板子的 bootloader 與 interrupt vector table 都使用 ATmega328P 相容介面，所以編譯與燒錄目標統一使用 `atmega328p` / `m328p`。
+
+這塊相容板的自動 reset 不穩定。若看到 `programmer is not responding`，在 `make upload` 開始後立刻短按一次 Reset，讓 AVRDUDE 正好遇到 bootloader 的同步時間窗；不需要連按或長按。
+
+## 從 WSL 看 UART 並輸入
 
 ```bash
 cd /mnt/d/ATmega_OS
-make
+make monitor
 ```
 
-成功後，檔案會在 `build/`：
+啟動時會顯示一次：
 
-- `build/atmega_os.elf`：給 GDB/除錯器使用
-- `build/atmega_os.hex`：給燒錄器使用
+```text
+ATmega OS UART ready
+```
 
-清除編譯輸出：
+啟動後會顯示 `os> ` prompt。輸入由板子逐字 echo；輸入 `help` 再按 Enter
+可列出 shell 指令。週期性的 `kernel alive` 和 stack report 已移除，需要
+資訊時使用 `uptime`、`tasks`、`stack`。按 `Ctrl+]` 或 `Ctrl+C` 離開。
+
+`screen /dev/ttyACM0 115200` 看似卡住，是因為 screen 本來就會佔據終端，而且這塊 USB bridge 經 usbipd 傳到 WSL 後目前收不到 UART byte。若使用其他相容的 USB-Serial adapter，仍可測試：
 
 ```bash
-make clean
+make upload-wsl WSL_PORT=/dev/ttyACM0
+screen /dev/ttyACM0 115200
 ```
 
-指定不同晶片，例如 ATmega2560：
+screen 的離開方式是依序按 `Ctrl+A`、`K`、`Y`，不是 `Ctrl+C`。
 
-```bash
-make clean
-make MCU=atmega2560 F_CPU=16000000UL
-```
+## 下一步
 
-## 4. 這個程式現在還不是完整 OS
-
-AVR 通常沒有記憶體保護或行程隔離；目前程式是直接從 reset vector 進入 `main()` 的 bare-metal 核心骨架。接下來可以依序加入：
-
-1. `sleep_ms()` 與 tick API
-2. cooperative task scheduler
-3. ring buffer 與 UART driver
-4. command shell
-5. task stack/context switch
-
-## 5. 常見錯誤
-
-- `device type is not defined`：沒有設定正確的 `MCU`。
-- `F_CPU` 不正確：Timer tick 與 UART baud rate 會不準。
-- `avrdude` 找不到 USB 裝置：WSL 編譯可以正常進行，但實體燒錄通常還需要 Windows 的 USB/WSL 裝置轉接設定。
-
+目前 event flags、UART shell、stack guard、kernel panic、software reboot
+與 software timer service 已可運作。接下來可選擇處理 task lifecycle，或沿
+SD card + bytecode VM 路線實作可載入 task。詳細路線放在 `docs/os-guide.md`。

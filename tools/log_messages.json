@@ -1,0 +1,11 @@
+{
+  "LOG_BOOT": "\r\nATmega OS UART ready\r\n",
+  "LOG_SHELL_READY": "shell ready; type help\r\n",
+  "LOG_SHELL_PROMPT": "os> ",
+  "LOG_SHELL_HELP": "commands:\r\n  help\r\n  uptime\r\n  tasks\r\n  stack\r\n  faults\r\n  panic\r\n  led on|off|blink\r\n  restart <task-id>\r\nstates: 0=READY 1=RUNNING 2=SLEEPING 3=TERMINATED 4=BLOCKED\r\npriority: 0=IDLE 1=LOW 2=NORMAL 3=HIGH\r\n",
+  "LOG_SHELL_OK": "ok\r\n",
+  "LOG_SHELL_UNKNOWN": "unknown command; type help\r\n",
+  "LOG_SHELL_LINE_LONG": "command is too long\r\n",
+  "LOG_SHELL_RESTART_USAGE": "usage: restart <task-id>\r\n",
+  "LOG_SHELL_RESTART_FAILED": "restart failed: task must be TERMINATED\r\n"
+}

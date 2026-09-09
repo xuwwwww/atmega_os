@@ -5,5 +5,6 @@
 
 void timer_init(void);
 uint32_t timer_millis(void);
+uint32_t timer_tick_from_isr(void);
 
 #endif

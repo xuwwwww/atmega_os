@@ -4,11 +4,13 @@
             "name": "AVR (WSL)",
             "compilerPath": "/usr/bin/avr-gcc",
             "compilerArgs": [
-                "-mmcu=atmega328p",
+                "-B/mnt/d/CodexHome/runtime/toolchains/Microchip.ATmega_DFP.3.6.299/gcc/dev/atmega328pb/",
+                "-mmcu=atmega328pb",
                 "-DF_CPU=16000000UL"
             ],
             "includePath": [
                 "${workspaceFolder}/**",
+                "/mnt/d/CodexHome/runtime/toolchains/Microchip.ATmega_DFP.3.6.299/include",
                 "/usr/lib/avr/include",
                 "/usr/lib/gcc/avr/5.4.0/include"
             ],
