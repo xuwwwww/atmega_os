@@ -6,15 +6,16 @@
 #include "tasks/idle_task.h"
 #include "tasks/led_task.h"
 #include "tasks/queue_test_tasks.h"
+#include "tasks/rv_demo_task.h"
 #include "tasks/shell_task.h"
 
 #include <avr/io.h>
 #include <stdint.h>
 
 #ifdef MESSAGE_QUEUE_SELF_TEST
-#define TASK_COUNT 6u
+#define TASK_COUNT 7u
 #else
-#define TASK_COUNT 4u
+#define TASK_COUNT 5u
 #endif
 
 _Static_assert(LED_STACK_SIZE >
@@ -33,12 +34,17 @@ _Static_assert(IDLE_STACK_SIZE >
                        TASK_INITIAL_FRAME_SIZE + TASK_STACK_GUARD_SIZE &&
                    IDLE_STACK_SIZE <= UINT8_MAX,
                "idle stack cannot hold its initial context");
+_Static_assert(RV_DEMO_STACK_SIZE >
+                       TASK_INITIAL_FRAME_SIZE + TASK_STACK_GUARD_SIZE &&
+                   RV_DEMO_STACK_SIZE <= UINT8_MAX,
+               "RV demo stack cannot hold its initial context");
 
 static task_t tasks[TASK_COUNT];
 static uint8_t led_stack[LED_STACK_SIZE];
 static uint8_t shell_stack[SHELL_STACK_SIZE];
 static uint8_t timer_service_stack[TIMER_SERVICE_STACK_SIZE];
 static uint8_t idle_stack[IDLE_STACK_SIZE];
+static uint8_t rv_demo_stack[RV_DEMO_STACK_SIZE];
 #ifdef MESSAGE_QUEUE_SELF_TEST
 static uint8_t queue_producer_stack[96u];
 static uint8_t queue_consumer_stack[112u];
@@ -78,10 +84,12 @@ int main(void)
               sizeof(timer_service_stack), TASK_PRIORITY_NORMAL);
     task_init(&tasks[3], idle_task, idle_stack, sizeof(idle_stack),
               TASK_PRIORITY_IDLE);
+    task_init(&tasks[4], rv_demo_task, rv_demo_stack,
+              sizeof(rv_demo_stack), TASK_PRIORITY_NORMAL);
 #ifdef MESSAGE_QUEUE_SELF_TEST
-    task_init(&tasks[4], queue_test_producer, queue_producer_stack,
+    task_init(&tasks[5], queue_test_producer, queue_producer_stack,
               sizeof(queue_producer_stack), TASK_PRIORITY_NORMAL);
-    task_init(&tasks[5], queue_test_consumer, queue_consumer_stack,
+    task_init(&tasks[6], queue_test_consumer, queue_consumer_stack,
               sizeof(queue_consumer_stack), TASK_PRIORITY_HIGH);
 #endif
 

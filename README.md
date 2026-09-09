@@ -63,7 +63,7 @@ Timer 選擇、頻率與桌面 OS 的差異請見
 [`docs/timers.md`](docs/timers.md)。
 Message queue 結構與同步流程請見
 [`docs/message-queue.md`](docs/message-queue.md)。
-目前整個 OS、event flags、software timer、shell 與 SRAM 的逐段教學請見
+目前整個 OS、event flags、software timer、shell、RV32I emulator 與 SRAM 的逐段教學請見
 [`docs/os-guide.md`](docs/os-guide.md)。
 
 ## 在 WSL 編譯
@@ -85,14 +85,15 @@ make upload KERNEL_TICK_HZ=1000UL
 也會更頻繁。目前 2 kHz 已通過實機測試；`timer_millis()` 仍每一個真正的
 1 ms 才加一，所以既有 sleep 時間不受影響。
 
-四個常駐 task stack 也能在 build 時各自設定：
+五個 task stack 也能在 build 時各自設定：
 
 ```bash
 make clean all \
   LED_STACK_SIZE=160 \
   SHELL_STACK_SIZE=224 \
   TIMER_SERVICE_STACK_SIZE=160 \
-  IDLE_STACK_SIZE=128
+  IDLE_STACK_SIZE=128 \
+  RV_DEMO_STACK_SIZE=128
 ```
 
 每個值必須大於初始 context frame 的 37 bytes，且不超過 255。不要把

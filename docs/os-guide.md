@@ -96,13 +96,13 @@ Flash 可以直接取指令，SRAM 不可以直接被 CPU 當成 AVR 指令執�
 和訊息放 SRAM。若要動態行為，使用 function pointer、bytecode interpreter
 或自己做 VM，而不是把 AVR machine code 複製到 SRAM。
 
-### 3.1 目前 862 bytes 靜態 SRAM 精確去哪裡
+### 3.1 目前 1212 bytes 靜態 SRAM 精確去哪裡
 
 正式 build 的 `avr-size`：
 
 ```text
-Program: 7960 bytes
-Data:     862 bytes
+Program: 10512 bytes
+Data:     1212 bytes
 ```
 
 這裡的 Data 是 `.data + .bss + .noinit`；panic record 位於 `.noinit`，其餘主要
@@ -110,11 +110,14 @@ Data:     862 bytes
 
 | 使用者 | bytes | 內容 |
 |---|---:|---|
-| 4 個 `task_t` | 64 | 4 × 16-byte TCB |
+| 5 個 `task_t` | 80 | 5 × 16-byte TCB |
 | LED stack | 160 | task 0 |
 | shell stack | 224 | task 1，內含 64-byte command line |
 | timer-service stack | 160 | task 2，執行到期 callback |
 | idle stack | 128 | task 3 |
+| RV demo stack | 128 | task 4，執行 guest interpreter 後終止 |
+| RV32 CPU state | 142 | x0-x31、PC、memory、ECALL 與狀態 |
+| RV32 guest memory | 64 | demo code 與 guest data |
 | UART RX/TX buffers | 64 | 32 + 32 |
 | UART indices/overflow | 5 | RX 三個、TX 兩個 byte |
 | UART RX semaphore | 3 | available character count |
@@ -126,9 +129,9 @@ Data:     862 bytes
 | mutex registry pointer | 2 | priority inheritance 掃描入口 |
 | panic `.noinit` record | 5 | reset cause、magic、code、detail |
 | LED software timer | 15 | callback、argument、deadline、period、flags |
-| **合計** | **862** | |
+| **合計** | **1212** | |
 
-所以 link-time 尚有 `2048 - 862 = 1186` bytes。reset 到
+所以 link-time 尚有 `2048 - 1212 = 836` bytes。reset 到
 `scheduler_start()` 之前，startup code 與 `main()` 的確仍使用 SRAM 頂端的
 硬體 stack；開始排程後 SP 會切到各 task stack array，ISR 和 scheduler 的
 呼叫深度也會記在該 task 的 watermark 中。因此這 1183 bytes 大部分目前是
@@ -143,6 +146,7 @@ Data:     862 bytes
 | shell | 224 | 待斷電重啟後重測 | — |
 | timer service | 160 | 待斷電重啟後重測 | — |
 | idle | 128 | 待斷電重啟後重測 | — |
+| RV demo | 128 | 編譯器估算 C call chain 約 41，加 ISR context 約 35 | 待量測 |
 
 `unused == 0` 絕不是最佳狀態，而是紅色警報：你不知道它剛好用到邊界，還是
 已經越界後又破壞別人。實務上要跑最壞 workload，再保留至少 16～32 bytes。
@@ -212,7 +216,7 @@ make upload SHELL_STACK_SIZE=240
 3. `uart_init()`：配置 115200 8-N-1、ring buffers 的 semaphore/mutex。
 4. `led_task_init()`：清 event bits，LED 進入 blink mode。
 5. 傳 boot Huffman frame。
-6. `task_init()` 建立四個 TCB 和初始 stack frame。
+6. `task_init()` 建立五個 TCB 和初始 stack frame。
 7. `scheduler_init()` 選最高 priority 的初始 task（shell）。
 8. `scheduler_start()` 用 assembly 載入該 stack，`ret` 直接進入 task entry。
 
@@ -224,6 +228,7 @@ make upload SHELL_STACK_SIZE=240
 | 1 | `shell_task` | HIGH=3 | UART 命令處理 |
 | 2 | `software_timer_task` | NORMAL=2 | 執行到期 timer callback |
 | 3 | `idle_task` | IDLE=0 | 沒別人能跑時提供 context |
+| 4 | `rv_demo_task` | NORMAL=2 | 執行 RV32I demo，完成後 return |
 
 ## 6. 一個「空 task」到底怎麼開始執行
 
@@ -496,9 +501,9 @@ led blink            回到短亮、長滅的 blink 模式
 restart <task-id>    只重啟 TERMINATED task
 ```
 
-看到 `restart failed` 不代表 restart 壞掉；目前四個 task 都設計成常駐無限迴圈，
-不是 TERMINATED。要練習可暫時新增一個 entry 只做一次工作後 return，再從 shell
-對其 ID 執行 restart。
+看到 `restart failed` 不代表 restart 壞掉；LED、shell、timer service 和 idle
+都是常駐無限迴圈，不會進入 TERMINATED。`rv_demo_task` 完成後會 return，因此
+可以從 shell 對 task 4 執行 `restart 4`，再次執行 emulator demo。
 
 ## 14. 實際操作與讀輸出
 
@@ -808,3 +813,54 @@ Software timer、stack guard 與 panic 已完成。接下來有兩條合理路�
 
 如果主要目標是學 RTOS kernel，下一步做 lifecycle cleanup；如果最想研究
 「從儲存裝置載入程式」，下一步做 SPI + SD raw-sector reader，再接小型 VM。
+
+## 20. 第一個 RV32I Emulator Milestone
+
+目前已加入 portable C 實作的 RV32I subset。`src/vm/rv32i.c` 不依賴 AVR
+register，因此同一份 decoder 可以先由筆電上的單元測試驗證，再由 `avr-gcc`
+編進 firmware。這是刻意建立的除錯邊界：CPU decode 錯誤不必每次都燒錄板子，
+而 Arduino 上的問題也不會和 SD driver 混在一起。
+
+`rv32_cpu_t` 保存 32 個 32-bit guest integer registers、32-bit PC、guest memory
+指標與大小、ECALL callback 和目前狀態。`x[0]` 在每條指令後強制寫回零，因為
+RISC-V 的 `x0` 是硬接零的 register。Guest memory 採 little-endian，所有
+instruction fetch、`LW`、`SW` 都做 4-byte alignment 與 bounds check；錯誤會
+進入 fault 狀態，不允許 guest 越界讀寫 AVR SRAM。
+
+第一階段支援：
+
+```text
+LUI, ADDI, ADD, SUB, LW, SW, BEQ, BNE, JAL, JALR, ECALL
+```
+
+`rv32_run(cpu, budget)` 最多執行 `budget` 條 guest instructions。Budget 用完時
+仍回傳 `RV32_RUNNING`，native VM task 便可呼叫 `task_yield()`，防止 guest 的
+無限迴圈長期霸佔 AVR。沒有註冊 handler 的 `ECALL` 目前代表正常 halt；下一階段
+會把 guest syscall number 映射到 UART、sleep、yield 和 exit。
+
+`rv_demo_task` 是第五個 native task。它在 64-byte SRAM guest memory 中建立：
+
+```text
+addi x1, x0, 20
+addi x2, x0, 22
+add  x3, x1, x2
+addi x4, x0, 48
+sw   x3, 0(x4)
+lw   x5, 0(x4)
+ecall
+```
+
+每個 time slice 最多模擬四條指令。實機得到 `x3=42`、將它 store 到 guest
+address 48，再由 `LW` 讀成 `x5=42`，UART 送出 `rv32 demo ok: x5=42`，最後
+task return 並進入 TERMINATED。這同時驗證 decoder、guest memory、preemption、
+cooperative yield 與 task-return trampoline。
+
+Host 測試涵蓋算術、負 immediate、`x0`、load/store、branch、jump、ECALL、
+instruction budget、misaligned access、out-of-bounds load 與 illegal instruction：
+
+```bash
+make test-rv32i
+```
+
+目前尚未支援完整 RV32I，也還沒有從 SD 取指令。下一個 emulator milestone 是
+加入 guest syscall ABI；完成後才實作 SPI 與 SD raw-sector reader。

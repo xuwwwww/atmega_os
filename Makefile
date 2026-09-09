@@ -10,11 +10,13 @@ SRC      := src/main.c \
 	 src/kernel/mutex.c \
 	 src/kernel/event_flags.c \
 	 src/kernel/message_queue.c \
+	 src/vm/rv32i.c \
 	 src/drivers/uart.c \
 	 src/generated/log_messages.c \
 	 src/tasks/idle_task.c \
 	 src/tasks/led_task.c \
 	 src/tasks/queue_test_tasks.c \
+	 src/tasks/rv_demo_task.c \
 	 src/tasks/shell_task.c
 ASM_SRC  := src/kernel/context.S
 UART_BAUD ?= 115200UL
@@ -23,6 +25,7 @@ LED_STACK_SIZE ?= 160
 SHELL_STACK_SIZE ?= 224
 TIMER_SERVICE_STACK_SIZE ?= 160
 IDLE_STACK_SIZE ?= 128
+RV_DEMO_STACK_SIZE ?= 128
 MONITOR_BAUD ?= 115200
 BUILD_DIR := build
 LOG_MANIFEST := tools/log_messages.json
@@ -49,6 +52,7 @@ CFLAGS   := $(DEVICE_FLAGS) -std=gnu11 -Os -Wall -Wextra -ffunction-sections -fd
 	-DSHELL_STACK_SIZE=$(SHELL_STACK_SIZE) \
 	-DTIMER_SERVICE_STACK_SIZE=$(TIMER_SERVICE_STACK_SIZE) \
 	-DIDLE_STACK_SIZE=$(IDLE_STACK_SIZE)
+CFLAGS   += -DRV_DEMO_STACK_SIZE=$(RV_DEMO_STACK_SIZE)
 CFLAGS   += $(EXTRA_CFLAGS)
 ASFLAGS  := $(DEVICE_FLAGS) -mmcu=$(MCU) -x assembler-with-cpp
 ASFLAGS  += $(EXTRA_ASFLAGS)
@@ -72,7 +76,7 @@ WSL_PORT ?= /dev/ttyACM0
 # readback support.
 AVRDUDE_WRITE_FLAGS ?= -V
 
-.PHONY: all clean size test test-codec test-event test-queue test-timer upload upload-wsl monitor
+.PHONY: all clean size test test-codec test-event test-queue test-timer test-rv32i upload upload-wsl monitor
 
 all: $(HEX) size
 
@@ -127,7 +131,13 @@ test-timer: | $(BUILD_DIR)
 		-o build/test_software_timer
 	./build/test_software_timer
 
-test: test-codec test-event test-queue test-timer
+test-rv32i: | $(BUILD_DIR)
+	cc -std=c11 -Wall -Wextra -Werror -Isrc/vm \
+		tools/test_rv32i.c src/vm/rv32i.c \
+		-o build/test_rv32i
+	./build/test_rv32i
+
+test: test-codec test-event test-queue test-timer test-rv32i
 
 upload: $(HEX)
 	"$(WINDOWS_AVRDUDE)" $(AVRDUDE_WRITE_FLAGS) -c arduino -p $(AVR_PART) -P $(PORT) -b $(BAUD) -D -U "flash:w:$(WINDOWS_HEX):i"
