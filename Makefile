@@ -12,6 +12,7 @@ SRC      := src/main.c \
 	 src/kernel/message_queue.c \
 	 src/vm/rv32i.c \
 	 src/drivers/uart.c \
+	 src/generated/rv_guest_image.c \
 	 src/generated/log_messages.c \
 	 src/tasks/idle_task.c \
 	 src/tasks/led_task.c \
@@ -33,6 +34,11 @@ LOG_GENERATOR := tools/generate_log_codec.py
 LOG_C := src/generated/log_messages.c
 LOG_H := src/generated/log_messages.h
 LOG_PY := tools/generated_log_codec.py
+RV_GUEST_BIN := guest_images/demo.bin
+RV_GUEST_GENERATOR := tools/generate_guest_image.py
+RV_GUEST_C := src/generated/rv_guest_image.c
+RV_GUEST_H := src/generated/rv_guest_image.h
+RV_GUEST_CAPACITY ?= 64
 
 # Use Microchip's official ATmega Device Family Pack installed on this machine.
 DFP_DIR      ?= /mnt/d/CodexHome/runtime/toolchains/Microchip.ATmega_DFP.3.6.299
@@ -87,6 +93,13 @@ $(LOG_C) $(LOG_H) $(LOG_PY) &: $(LOG_MANIFEST) $(LOG_GENERATOR)
 		--c-header $(LOG_H) \
 		--python $(LOG_PY)
 
+$(RV_GUEST_C) $(RV_GUEST_H) &: $(RV_GUEST_BIN) $(RV_GUEST_GENERATOR)
+	python3 $(RV_GUEST_GENERATOR) \
+		--input $(RV_GUEST_BIN) \
+		--c-source $(RV_GUEST_C) \
+		--c-header $(RV_GUEST_H) \
+		--capacity $(RV_GUEST_CAPACITY)
+
 $(BUILD_DIR):
 	mkdir -p $@
 
@@ -100,6 +113,7 @@ $(BUILD_DIR)/%.o: src/%.S | $(BUILD_DIR)
 	$(CC) $(ASFLAGS) -MMD -MP -c $< -o $@
 
 $(BUILD_DIR)/main.o $(BUILD_DIR)/tasks/shell_task.o: $(LOG_H)
+$(BUILD_DIR)/tasks/rv_demo_task.o: $(RV_GUEST_H)
 
 $(ELF): $(OBJ)
 	$(CC) $(LDFLAGS) -o $@ $^

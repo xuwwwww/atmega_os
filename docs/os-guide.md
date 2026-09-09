@@ -101,7 +101,7 @@ Flash 可以直接取指令，SRAM 不可以直接被 CPU 當成 AVR 指令執�
 正式 build 的 `avr-size`：
 
 ```text
-Program: 10512 bytes
+Program: 10420 bytes
 Data:     1212 bytes
 ```
 
@@ -838,7 +838,15 @@ LUI, ADDI, ADD, SUB, LW, SW, BEQ, BNE, JAL, JALR, ECALL
 無限迴圈長期霸佔 AVR。沒有註冊 handler 的 `ECALL` 目前代表正常 halt；下一階段
 會把 guest syscall number 映射到 UART、sleep、yield 和 exit。
 
-`rv_demo_task` 是第五個 native task。它在 64-byte SRAM guest memory 中建立：
+`guest-riscv/` 是獨立 Git repository。它的 `src/demo.S` 先在筆電經過：
+
+```text
+RISC-V assembly -> ELF -> 28-byte raw binary -> guest_images/demo.bin
+```
+
+outer OS build 再把這份 binary 轉成 AVR Flash 裡的 `PROGMEM` array。
+`rv_demo_task` 是第五個 native task；啟動時把 image 從 Flash 複製到 64-byte
+SRAM guest memory，然後把 guest PC 設成 0。第一個 guest 程式是：
 
 ```text
 addi x1, x0, 20
@@ -861,6 +869,21 @@ instruction budget、misaligned access、out-of-bounds load 與 illegal instruct
 ```bash
 make test-rv32i
 ```
+
+修改 guest assembly 後的完整 build pipeline：
+
+```bash
+cd guest-riscv
+make inspect       # 看 ELF disassembly 與 raw bytes
+make export        # 更新 ../guest_images/demo.bin
+cd ..
+make clean all     # 重新嵌入 guest image 並編譯 AVR firmware
+make upload
+```
+
+Arduino 收到的是已編譯的 RISC-V machine code，不會在板上執行 assembler。
+目前 image 隨 AVR firmware 一起燒到 Flash，再複製進 SRAM；等 UART RX bridge 或
+SD reader 完成後，loader 才能在不重燒 firmware 的情況下替換 SRAM image。
 
 目前尚未支援完整 RV32I，也還沒有從 SD 取指令。下一個 emulator milestone 是
 加入 guest syscall ABI；完成後才實作 SPI 與 SD raw-sector reader。
