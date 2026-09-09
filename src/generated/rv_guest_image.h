@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define RV_GUEST_IMAGE_SIZE 28u
+#define RV_GUEST_IMAGE_SIZE 154u
 
 extern const uint8_t rv_guest_image[RV_GUEST_IMAGE_SIZE];
 

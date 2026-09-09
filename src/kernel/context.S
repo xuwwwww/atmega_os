@@ -20,6 +20,18 @@
     CONTEXT_SAVE_REGISTERS
 .endm
 
+/* Interrupt entry clears SREG.I in hardware.  The interrupted task was
+ * necessarily running with I set, so put that logical value in its frame. */
+.macro CONTEXT_SAVE_ISR
+    push r0
+    in   r0, _SFR_IO_ADDR(SREG)
+    set
+    bld  r0, SREG_I
+    cli
+    push r0
+    CONTEXT_SAVE_REGISTERS
+.endm
+
 .macro CONTEXT_SAVE_REGISTERS
     push r1
     clr  r1
@@ -142,7 +154,7 @@ scheduler_start:
  * single RETI can resume either an interrupted or a never-run task. */
 .type TIMER2_COMPA_vect, @function
 TIMER2_COMPA_vect:
-    CONTEXT_SAVE
+    CONTEXT_SAVE_ISR
     CONTEXT_LOAD_KERNEL_STACK
     call scheduler_tick
     CONTEXT_RESTORE

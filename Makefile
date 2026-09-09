@@ -38,7 +38,7 @@ RV_GUEST_BIN := guest_images/demo.bin
 RV_GUEST_GENERATOR := tools/generate_guest_image.py
 RV_GUEST_C := src/generated/rv_guest_image.c
 RV_GUEST_H := src/generated/rv_guest_image.h
-RV_GUEST_CAPACITY ?= 64
+RV_GUEST_CAPACITY ?= 192
 
 # Use Microchip's official ATmega Device Family Pack installed on this machine.
 DFP_DIR      ?= /mnt/d/CodexHome/runtime/toolchains/Microchip.ATmega_DFP.3.6.299

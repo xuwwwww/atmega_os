@@ -827,41 +827,65 @@ RISC-V 的 `x0` 是硬接零的 register。Guest memory 採 little-endian，所�
 instruction fetch、`LW`、`SW` 都做 4-byte alignment 與 bounds check；錯誤會
 進入 fault 狀態，不允許 guest 越界讀寫 AVR SRAM。
 
-第一階段支援：
+目前支援 RV32I 整數核心中，足以讓 freestanding C 程式工作的部分：
 
 ```text
-LUI, ADDI, ADD, SUB, LW, SW, BEQ, BNE, JAL, JALR, ECALL
+LUI, AUIPC
+ADDI, SLTI, SLTIU, XORI, ORI, ANDI, SLLI, SRLI, SRAI
+ADD, SUB, SLT, SLTU, XOR, OR, AND, SLL, SRL, SRA
+LB, LBU, LH, LHU, LW
+SB, SH, SW
+BEQ, BNE, BLT, BGE, BLTU, BGEU
+JAL, JALR, FENCE, ECALL
 ```
+
+目前沒有 `M` extension（乘除法）、compressed `C` extension、CSR、privilege mode、
+exception vector 或 virtual memory。這不是 Linux 能看見的完整 RISC-V machine，
+而是一個有 bounds check 的 RV32I user-mode sandbox。
 
 `rv32_run(cpu, budget)` 最多執行 `budget` 條 guest instructions。Budget 用完時
 仍回傳 `RV32_RUNNING`，native VM task 便可呼叫 `task_yield()`，防止 guest 的
 無限迴圈長期霸佔 AVR。沒有註冊 handler 的 `ECALL` 目前代表正常 halt；下一階段
 會把 guest syscall number 映射到 UART、sleep、yield 和 exit。
 
-`guest-riscv/` 是獨立 Git repository。它的 `src/demo.S` 先在筆電經過：
+`guest-riscv/` 是獨立 Git repository。現在 guest 不再只是手寫七條組語，而是：
 
 ```text
-RISC-V assembly -> ELF -> 28-byte raw binary -> guest_images/demo.bin
+src/start.S + src/main.c
+        ↓ riscv64-unknown-elf-gcc -march=rv32i -mabi=ilp32
+154-byte raw payload demo.bin
+        ↓ make export
+../guest_images/demo.bin
+        ↓ parent image generator
+AVR Flash 裡的 PROGMEM array
+        ↓ rv_demo_task 啟動
+192-byte AVR SRAM guest memory
 ```
 
 outer OS build 再把這份 binary 轉成 AVR Flash 裡的 `PROGMEM` array。
-`rv_demo_task` 是第五個 native task；啟動時把 image 從 Flash 複製到 64-byte
-SRAM guest memory，然後把 guest PC 設成 0。第一個 guest 程式是：
+`src/start.S` 只做最小 C runtime：把 guest `sp` 設成 address 192，呼叫 C
+`main()`，再把 `main()` 的 return value 當成 exit code。Linker 限制 image 不得
+超過 160 bytes，保留最高 32 bytes 給 guest C stack。
+
+guest C 程式透過 `a7` 放 syscall number、`a0/a1` 放參數，執行 `ECALL`：
 
 ```text
-addi x1, x0, 20
-addi x2, x0, 22
-add  x3, x1, x2
-addi x4, x0, 48
-sw   x3, 0(x4)
-lw   x5, 0(x4)
-ecall
+0 = yield()
+1 = sleep(milliseconds)
+2 = write(guest_address, byte_count)
+3 = exit(code)
 ```
 
-每個 time slice 最多模擬四條指令。實機得到 `x3=42`、將它 store 到 guest
-address 48，再由 `LW` 讀成 `x5=42`，UART 送出 `rv32 demo ok: x5=42`，最後
-task return 並進入 TERMINATED。這同時驗證 decoder、guest memory、preemption、
-cooperative yield 與 task-return trampoline。
+`ECALL` callback 只複製 register 並回傳 `RV32_PAUSED`，不直接呼叫 UART 或
+`task_sleep()`。原因是 emulator decoder 當時仍占用 native task C stack；先讓
+`rv32_run()` unwind 回 `rv_demo_task`，再執行可能 block/context-switch 的 host
+service，會讓 stack lifetime 很清楚，也比較容易檢查剩餘 stack。
+
+demo 的實際行為是印出 `guest C start`、主動 yield、sleep 25 ms、印出
+`guest C awake`，最後用一個 `noinline` C function 算出 `20 + 22` 並 return 42。
+host 收到 exit syscall 後印出 `rv32 C guest exit=42`。這已驗證 C calling
+convention、guest stack、load/store、function call/return、四種 syscall，以及
+guest 暫停後由 native OS task 恢復執行。
 
 Host 測試涵蓋算術、負 immediate、`x0`、load/store、branch、jump、ECALL、
 instruction budget、misaligned access、out-of-bounds load 與 illegal instruction：
@@ -885,5 +909,44 @@ Arduino 收到的是已編譯的 RISC-V machine code，不會在板上執行 ass
 目前 image 隨 AVR firmware 一起燒到 Flash，再複製進 SRAM；等 UART RX bridge 或
 SD reader 完成後，loader 才能在不重燒 firmware 的情況下替換 SRAM image。
 
-目前尚未支援完整 RV32I，也還沒有從 SD 取指令。下一個 emulator milestone 是
-加入 guest syscall ABI；完成後才實作 SPI 與 SD raw-sector reader。
+也可以在 inner repository 直接執行：
+
+```bash
+make upload
+```
+
+這個 target 會 build guest、export binary，再委託 parent Makefile build/upload；
+它不是把 RISC-V `.bin` 直接交給 AVR bootloader。
+
+目前還沒有從 SD 取指令。下一個 emulator milestone 是把單一 demo context 改成
+多個 guest process context，再由 UART 或 SD loader 取代編譯期 `PROGMEM` image。
+
+## 21. LGT8F 相容核心的 context-switch 驗收結果
+
+這塊 Uno Type-C 板不是原廠 ATmega328P，而是 LGT8F328P 類相容核心。它可以用
+`atmega328p` ABI 編譯，也能正常執行一般 C 的 `CALL/RET`；硬體 probe 亦確認
+`CALL` 會讓 SP 下降 2 bytes。但在兩個獨立 SRAM stack 間反覆切換時，返回 PC 的
+高位會被改成與標準 ATmega328P 不同的值，最後跳進未使用 vector 或 reset。
+
+已分別排除：
+
+- UART UDRE ISR；
+- Timer ISR（完全關閉 tick，只讓兩個 task 主動 yield 仍可重現）；
+- 特定 task 程式（兩個只呼叫 `task_yield()` 的空 task 仍可重現）；
+- stack 跨過 `0x0200`；
+- 未關閉的 INT0/Timer1 等 peripheral interrupt source；
+- `CALL` 只壓一個 byte（實測是兩個）。
+
+[LGT8FX8P databook](https://github.com/dbuezas/lgt8fx/blob/master/docs/LGT8FX8P_databook_v1.0.5-English.pdf)
+宣稱 interrupt/return PC 是兩 bytes，但公開資料沒有描述它的「program
+encryption algorithm」是否另有不能由 AVR software 讀寫的 return state。
+[FreeRTOS 論壇的 LGT8F 討論](https://forums.freertos.org/t/logic-green/8541)
+中也同時出現「task doesn’t switch」與改 Timer2 後「基本可跑」的回報，資料互相
+矛盾。因此目前不能把這顆 clone 的長時間 stackful preemption 當成已驗收；同一
+份 context port 還需要用**原廠 ATmega328P Uno**交叉驗證，或取得 LGT 專用
+debug/programming 文件。
+
+這不影響 RV32I decoder 的 host 單元測試，也不會刪掉既有 OS；它影響的是這塊
+實體相容板能否可靠地在多個 native AVR stack 間切換。若只針對此 LGT 板繼續，
+可考慮 stackless event loop/protothread；若目標是學傳統 preemptive RTOS，換原廠
+ATmega328P 是比較能驗證標準 AVR context frame 的路線。

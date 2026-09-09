@@ -149,11 +149,95 @@ static void test_faults_and_budget(void)
     assert(rv32_step(&cpu) == RV32_FAULT_LOAD);
 }
 
+typedef struct
+{
+    uint8_t next_call;
+    uint32_t exit_code;
+} guest_trace_t;
+
+static rv32_status_t trace_guest_ecall(struct rv32_cpu *cpu, void *context)
+{
+    static const uint8_t expected_calls[] = {2u, 0u, 1u, 2u, 3u};
+    guest_trace_t *trace = context;
+    uint32_t number = cpu->x[17];
+
+    assert(trace->next_call < sizeof(expected_calls));
+    assert(number == expected_calls[trace->next_call++]);
+
+    if (number == 1u)
+    {
+        assert(cpu->x[10] == 25u);
+    }
+    else if (number == 2u)
+    {
+        uint32_t address = cpu->x[10];
+        uint32_t length = cpu->x[11];
+
+        assert(length == 13u);
+        assert(address + length <= cpu->memory_size);
+        if (trace->next_call == 1u)
+        {
+            assert(memcmp(&cpu->memory[address], "guest C start", 13u) == 0);
+        }
+        else
+        {
+            assert(memcmp(&cpu->memory[address], "guest C awake", 13u) == 0);
+        }
+        cpu->x[10] = length;
+    }
+    else if (number == 3u)
+    {
+        trace->exit_code = cpu->x[10];
+        return RV32_HALTED;
+    }
+
+    return RV32_PAUSED;
+}
+
+static void test_compiled_c_guest(void)
+{
+    uint8_t memory[192] = {0};
+    guest_trace_t trace = {0u, 0u};
+    rv32_cpu_t cpu;
+    FILE *image = fopen("guest_images/demo.bin", "rb");
+    size_t image_size;
+
+    assert(image != NULL);
+    image_size = fread(memory, 1u, sizeof(memory), image);
+    assert(!ferror(image));
+    assert(feof(image));
+    assert(fclose(image) == 0);
+    assert(image_size > 0u && image_size <= 160u);
+
+    rv32_init(&cpu, memory, sizeof(memory));
+    cpu.ecall_handler = trace_guest_ecall;
+    cpu.ecall_context = &trace;
+
+    while (cpu.status != RV32_HALTED)
+    {
+        if (cpu.status == RV32_RUNNING)
+        {
+            rv32_run(&cpu, 3u);
+        }
+        else
+        {
+            assert(cpu.status == RV32_PAUSED);
+            cpu.status = RV32_RUNNING;
+        }
+    }
+
+    assert(cpu.status == RV32_HALTED);
+    assert(trace.next_call == 5u);
+    assert(trace.exit_code == 42u);
+    assert(cpu.x[2] == sizeof(memory));
+}
+
 int main(void)
 {
     test_arithmetic_and_halt();
     test_memory_and_control_flow();
     test_faults_and_budget();
+    test_compiled_c_guest();
     puts("RV32I emulator tests passed");
     return 0;
 }

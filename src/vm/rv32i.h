@@ -6,6 +6,7 @@
 typedef enum
 {
     RV32_RUNNING = 0,
+    RV32_PAUSED,
     RV32_HALTED,
     RV32_FAULT_FETCH,
     RV32_FAULT_LOAD,

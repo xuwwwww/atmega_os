@@ -52,8 +52,9 @@ static uint8_t queue_consumer_stack[112u];
 
 int main(void)
 {
-    /* A software reboot does not reset peripheral registers.  Start from a
-     * known state so stale pin-change enables cannot invoke an unowned ISR. */
+    /* A software reboot does not reset peripheral registers. Disable every
+     * interrupt source before individual drivers enable the ones they own. */
+    EIMSK = 0u;
     PCICR = 0u;
     PCMSK0 = 0u;
     PCMSK1 = 0u;
@@ -61,6 +62,15 @@ int main(void)
 #ifdef PCMSK3
     PCMSK3 = 0u;
 #endif
+    TIMSK0 = 0u;
+    TIMSK1 = 0u;
+    TIMSK2 = 0u;
+    SPCR = 0u;
+    TWCR = 0u;
+    ADCSRA &= (uint8_t)~(1u << ADIE);
+    ACSR &= (uint8_t)~(1u << ACIE);
+    EECR &= (uint8_t)~(1u << EERIE);
+    SPMCSR &= (uint8_t)~(1u << SPMIE);
 
     DDRB |= (1u << DDB5);
 
