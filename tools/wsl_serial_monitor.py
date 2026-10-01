@@ -7,25 +7,114 @@ import selectors
 import subprocess
 import sys
 import termios
+import time
 import tty
 
 from generated_log_codec import DECODE_TABLE
 
 
 FRAME_ESCAPE = 0x00
+FRAME_SYNC = 0x7E
 FRAME_COMPRESSED = 0x01
 FRAME_STACK_REPORT = 0x02
 FRAME_SHELL_TEXT = 0x03
 FRAME_PANIC = 0x04
 
 
-class SerialDecoder:
+class TerminalInputFilter:
+    """Pass text plus Up/Down history keys; discard other terminal controls."""
+
     def __init__(self):
+        self.state = "text"
+        self.sequence_prefix = None
+        self.current_line = bytearray()
+        self.history = []
+        self.history_index = None
+
+    def _replace_line(self, replacement):
+        output = bytearray(b"\b \b" * len(self.current_line))
+        output.extend(replacement)
+        self.current_line = bytearray(replacement)
+        return output
+
+    def _recall(self, direction):
+        if not self.history:
+            return bytearray()
+
+        if direction == "up":
+            if self.history_index is None:
+                self.history_index = len(self.history) - 1
+            elif self.history_index > 0:
+                self.history_index -= 1
+            return self._replace_line(self.history[self.history_index])
+
+        if self.history_index is None:
+            return bytearray()
+        if self.history_index + 1 < len(self.history):
+            self.history_index += 1
+            return self._replace_line(self.history[self.history_index])
+        self.history_index = None
+        return self._replace_line(b"")
+
+    def render_history(self):
+        return b"".join(
+            f"{index} ".encode("ascii") + command + b"\r\n"
+            for index, command in enumerate(self.history, 1)
+        )
+
+    def feed(self, data):
+        output = bytearray()
+
+        for byte in data:
+            if self.state == "escape":
+                if byte in (ord("["), ord("O")):
+                    self.sequence_prefix = byte
+                    self.state = "sequence"
+                else:
+                    self.state = "text"
+                continue
+
+            if self.state == "sequence":
+                if byte == ord("A"):
+                    output.extend(self._recall("up"))
+                elif byte == ord("B"):
+                    output.extend(self._recall("down"))
+                if 0x40 <= byte <= 0x7E:
+                    self.state = "text"
+                continue
+
+            if byte == 0x1B:
+                self.state = "escape"
+            elif byte in (0x08, 0x7F):
+                if self.current_line:
+                    self.current_line.pop()
+                self.history_index = None
+                output.append(byte)
+            elif byte in (0x0A, 0x0D):
+                command = bytes(self.current_line)
+                if command and (not self.history or self.history[-1] != command):
+                    self.history.append(command)
+                    del self.history[:-32]
+                self.current_line.clear()
+                self.history_index = None
+                output.append(byte)
+            elif 0x20 <= byte <= 0x7E:
+                self.current_line.append(byte)
+                self.history_index = None
+                output.append(byte)
+
+        return bytes(output)
+
+
+class SerialDecoder:
+    def __init__(self, history_provider=None):
         self.state = "raw"
+        self.transport_escape = False
         self.bit_count = 0
         self.payload_size = 0
         self.payload = bytearray()
         self.frame_type = None
+        self.history_provider = history_provider
 
     @staticmethod
     def decode_huffman(payload, bit_count):
@@ -53,19 +142,36 @@ class SerialDecoder:
     def feed(self, data):
         output = bytearray()
 
-        for byte in data:
-            if self.state == "raw":
-                if byte == FRAME_ESCAPE:
-                    self.state = "escape"
+        for physical_byte in data:
+            if self.transport_escape:
+                self.transport_escape = False
+                if physical_byte == FRAME_ESCAPE:
+                    byte = FRAME_ESCAPE
+                elif physical_byte == FRAME_SYNC:
+                    # A sync marker is valid in every parser state. Drop any
+                    # incomplete frame left behind by corruption or reboot.
+                    self.state = "frame_type"
+                    self.payload.clear()
+                    self.bit_count = 0
+                    self.payload_size = 0
+                    self.frame_type = None
+                    continue
                 else:
-                    output.append(byte)
+                    output.extend(b"[UART framing error]")
+                    self.state = "raw"
+                    continue
+            elif physical_byte == FRAME_ESCAPE:
+                self.transport_escape = True
+                continue
+            else:
+                byte = physical_byte
+
+            if self.state == "raw":
+                output.append(byte)
                 continue
 
-            if self.state == "escape":
-                if byte == FRAME_ESCAPE:
-                    output.append(FRAME_ESCAPE)
-                    self.state = "raw"
-                elif byte == FRAME_COMPRESSED:
+            if self.state == "frame_type":
+                if byte == FRAME_COMPRESSED:
                     self.state = "length_low"
                 elif byte in (FRAME_STACK_REPORT, FRAME_SHELL_TEXT, FRAME_PANIC):
                     self.frame_type = byte
@@ -126,8 +232,12 @@ class SerialDecoder:
                             f"priorities base/effective: {priorities}]\r\n"
                         )
                     elif self.frame_type == FRAME_SHELL_TEXT:
-                        output.extend(self.payload)
-                        output.extend(b"\r\n")
+                        if (self.payload == b"\x1fH" and
+                                self.history_provider is not None):
+                            output.extend(self.history_provider())
+                        else:
+                            output.extend(self.payload)
+                            output.extend(b"\r\n")
                         self.state = "raw"
                         continue
                     elif self.frame_type == FRAME_PANIC and len(self.payload) == 2:
@@ -155,12 +265,14 @@ def parse_args():
     parser.add_argument("--script", required=True)
     parser.add_argument("--port", default="COM6")
     parser.add_argument("--baud", type=int, default=115200)
+    parser.add_argument("--reset", action="store_true")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
-    decoder = SerialDecoder()
+    input_filter = TerminalInputFilter()
+    decoder = SerialDecoder(input_filter.render_history)
     command = [
         "powershell.exe",
         "-NoProfile",
@@ -173,6 +285,8 @@ def main():
         "-BaudRate",
         str(args.baud),
     ]
+    if args.reset:
+        command.append("-ResetOnOpen")
 
     process = subprocess.Popen(
         command,
@@ -189,6 +303,12 @@ def main():
     selector.register(stdout_fd, selectors.EVENT_READ, "serial")
     selector.register(stdin_fd, selectors.EVENT_READ, "keyboard")
     user_exit = False
+    # The first CR is sent by the Windows relay immediately after Open().  A
+    # second one is delayed until an Uno bootloader/reset window has elapsed;
+    # this guarantees that a successful interactive connection visibly lands
+    # on the application shell prompt.
+    prompt_deadline = time.monotonic() + 2.0
+    prompt_requested = False
 
     sys.stdout.write(
         f"Serial monitor: {args.port} at {args.baud} baud "
@@ -201,6 +321,10 @@ def main():
             tty.setcbreak(stdin_fd)
 
         while process.poll() is None:
+            if not prompt_requested and time.monotonic() >= prompt_deadline:
+                process.stdin.write(b"\r")
+                process.stdin.flush()
+                prompt_requested = True
             for key, _ in selector.select(timeout=0.05):
                 if key.data == "serial":
                     data = os.read(stdout_fd, 4096)
@@ -218,14 +342,17 @@ def main():
 
                 if b"\x1d" in data:
                     before_exit = data.split(b"\x1d", 1)[0]
-                    if before_exit:
-                        process.stdin.write(before_exit)
+                    filtered = input_filter.feed(before_exit)
+                    if filtered:
+                        process.stdin.write(filtered)
                         process.stdin.flush()
                     user_exit = True
                     return 0
 
-                process.stdin.write(data)
-                process.stdin.flush()
+                filtered = input_filter.feed(data)
+                if filtered:
+                    process.stdin.write(filtered)
+                    process.stdin.flush()
 
         return process.returncode
     except KeyboardInterrupt:

@@ -1,4 +1,5 @@
 #include "rv32i.h"
+#include "rv32_compat.h"
 
 #include <stddef.h>
 
@@ -13,6 +14,11 @@
 #define RV32_OPCODE_JALR 0x67u
 #define RV32_OPCODE_JAL 0x6fu
 #define RV32_OPCODE_SYSTEM 0x73u
+
+#define REG_READ(cpu, index) \
+    rv32_compat_reg_read((cpu)->x, (index))
+#define REG_WRITE(cpu, index, value) \
+    rv32_compat_reg_write((cpu)->x, (index), (value))
 
 static uint32_t sign_extend(uint32_t value, uint8_t bit_count)
 {
@@ -36,9 +42,10 @@ static uint32_t arithmetic_shift_right(uint32_t value, uint8_t amount)
     }
     if ((value & 0x80000000UL) == 0u)
     {
-        return value >> amount;
+        return rv32_compat_lsr(value, amount);
     }
-    return (value >> amount) | ~(0xffffffffUL >> amount);
+    return rv32_compat_lsr(value, amount) |
+           ~rv32_compat_lsr(0xffffffffUL, amount);
 }
 
 static uint8_t address_valid(const rv32_cpu_t *cpu, uint32_t address,
@@ -85,7 +92,7 @@ void rv32_init(rv32_cpu_t *cpu, uint8_t *memory, uint16_t memory_size)
 {
     for (uint8_t i = 0u; i < 32u; i++)
     {
-        cpu->x[i] = 0u;
+        REG_WRITE(cpu, i, 0u);
     }
 
     cpu->pc = 0u;
@@ -94,6 +101,19 @@ void rv32_init(rv32_cpu_t *cpu, uint8_t *memory, uint16_t memory_size)
     cpu->ecall_handler = NULL;
     cpu->ecall_context = NULL;
     cpu->status = RV32_RUNNING;
+}
+
+uint32_t rv32_register_read(const rv32_cpu_t *cpu, uint8_t index)
+{
+    return index < 32u ? REG_READ(cpu, index) : 0u;
+}
+
+void rv32_register_write(rv32_cpu_t *cpu, uint8_t index, uint32_t value)
+{
+    if (index < 32u)
+    {
+        REG_WRITE(cpu, index, value);
+    }
 }
 
 rv32_status_t rv32_step(rv32_cpu_t *cpu)
@@ -121,7 +141,6 @@ rv32_status_t rv32_step(rv32_cpu_t *cpu)
         cpu->status = RV32_FAULT_FETCH;
         return cpu->status;
     }
-
     instruction = load_u32(cpu->memory, cpu->pc);
     next_pc = cpu->pc + 4u;
     opcode = (uint8_t)(instruction & 0x7fu);
@@ -134,10 +153,10 @@ rv32_status_t rv32_step(rv32_cpu_t *cpu)
     switch (opcode)
     {
     case RV32_OPCODE_LUI:
-        cpu->x[rd] = instruction & 0xfffff000UL;
+        REG_WRITE(cpu, rd, instruction & 0xfffff000UL);
         break;
     case RV32_OPCODE_AUIPC:
-        cpu->x[rd] = cpu->pc + (instruction & 0xfffff000UL);
+        REG_WRITE(cpu, rd, cpu->pc + (instruction & 0xfffff000UL));
         break;
 
     case RV32_OPCODE_OP_IMM:
@@ -147,22 +166,28 @@ rv32_status_t rv32_step(rv32_cpu_t *cpu)
 
         switch (funct3)
         {
-        case 0u: cpu->x[rd] = cpu->x[rs1] + immediate; break;
+        case 0u: REG_WRITE(cpu, rd, REG_READ(cpu, rs1) + immediate); break;
         case 1u:
-            if (funct7 == 0u) cpu->x[rd] = cpu->x[rs1] << shift;
+            if (funct7 == 0u)
+                REG_WRITE(cpu, rd, REG_READ(cpu, rs1) << shift);
             else cpu->status = RV32_FAULT_ILLEGAL_INSTRUCTION;
             break;
-        case 2u: cpu->x[rd] = signed_less_than(cpu->x[rs1], immediate); break;
-        case 3u: cpu->x[rd] = cpu->x[rs1] < immediate; break;
-        case 4u: cpu->x[rd] = cpu->x[rs1] ^ immediate; break;
+        case 2u:
+            REG_WRITE(cpu, rd, signed_less_than(REG_READ(cpu, rs1), immediate));
+            break;
+        case 3u: REG_WRITE(cpu, rd, REG_READ(cpu, rs1) < immediate); break;
+        case 4u: REG_WRITE(cpu, rd, REG_READ(cpu, rs1) ^ immediate); break;
         case 5u:
-            if (funct7 == 0u) cpu->x[rd] = cpu->x[rs1] >> shift;
+            if (funct7 == 0u)
+                REG_WRITE(cpu, rd,
+                          rv32_compat_lsr(REG_READ(cpu, rs1), shift));
             else if (funct7 == 0x20u)
-                cpu->x[rd] = arithmetic_shift_right(cpu->x[rs1], shift);
+                REG_WRITE(cpu, rd,
+                          arithmetic_shift_right(REG_READ(cpu, rs1), shift));
             else cpu->status = RV32_FAULT_ILLEGAL_INSTRUCTION;
             break;
-        case 6u: cpu->x[rd] = cpu->x[rs1] | immediate; break;
-        case 7u: cpu->x[rd] = cpu->x[rs1] & immediate; break;
+        case 6u: REG_WRITE(cpu, rd, REG_READ(cpu, rs1) | immediate); break;
+        case 7u: REG_WRITE(cpu, rd, REG_READ(cpu, rs1) & immediate); break;
         default: cpu->status = RV32_FAULT_ILLEGAL_INSTRUCTION; break;
         }
         break;
@@ -170,44 +195,56 @@ rv32_status_t rv32_step(rv32_cpu_t *cpu)
 
     case RV32_OPCODE_OP:
     {
-        uint8_t shift = (uint8_t)(cpu->x[rs2] & 0x1fu);
+        uint8_t shift = (uint8_t)(REG_READ(cpu, rs2) & 0x1fu);
 
         switch (funct3)
         {
         case 0u:
-            if (funct7 == 0u) cpu->x[rd] = cpu->x[rs1] + cpu->x[rs2];
-            else if (funct7 == 0x20u) cpu->x[rd] = cpu->x[rs1] - cpu->x[rs2];
+            if (funct7 == 0u)
+                REG_WRITE(cpu, rd, REG_READ(cpu, rs1) + REG_READ(cpu, rs2));
+            else if (funct7 == 0x20u)
+                REG_WRITE(cpu, rd, REG_READ(cpu, rs1) - REG_READ(cpu, rs2));
             else cpu->status = RV32_FAULT_ILLEGAL_INSTRUCTION;
             break;
         case 1u:
-            if (funct7 == 0u) cpu->x[rd] = cpu->x[rs1] << shift;
+            if (funct7 == 0u)
+                REG_WRITE(cpu, rd, REG_READ(cpu, rs1) << shift);
             else cpu->status = RV32_FAULT_ILLEGAL_INSTRUCTION;
             break;
         case 2u:
             if (funct7 == 0u)
-                cpu->x[rd] = signed_less_than(cpu->x[rs1], cpu->x[rs2]);
+                REG_WRITE(cpu, rd,
+                          signed_less_than(REG_READ(cpu, rs1),
+                                           REG_READ(cpu, rs2)));
             else cpu->status = RV32_FAULT_ILLEGAL_INSTRUCTION;
             break;
         case 3u:
-            if (funct7 == 0u) cpu->x[rd] = cpu->x[rs1] < cpu->x[rs2];
+            if (funct7 == 0u)
+                REG_WRITE(cpu, rd, REG_READ(cpu, rs1) < REG_READ(cpu, rs2));
             else cpu->status = RV32_FAULT_ILLEGAL_INSTRUCTION;
             break;
         case 4u:
-            if (funct7 == 0u) cpu->x[rd] = cpu->x[rs1] ^ cpu->x[rs2];
+            if (funct7 == 0u)
+                REG_WRITE(cpu, rd, REG_READ(cpu, rs1) ^ REG_READ(cpu, rs2));
             else cpu->status = RV32_FAULT_ILLEGAL_INSTRUCTION;
             break;
         case 5u:
-            if (funct7 == 0u) cpu->x[rd] = cpu->x[rs1] >> shift;
+            if (funct7 == 0u)
+                REG_WRITE(cpu, rd,
+                          rv32_compat_lsr(REG_READ(cpu, rs1), shift));
             else if (funct7 == 0x20u)
-                cpu->x[rd] = arithmetic_shift_right(cpu->x[rs1], shift);
+                REG_WRITE(cpu, rd,
+                          arithmetic_shift_right(REG_READ(cpu, rs1), shift));
             else cpu->status = RV32_FAULT_ILLEGAL_INSTRUCTION;
             break;
         case 6u:
-            if (funct7 == 0u) cpu->x[rd] = cpu->x[rs1] | cpu->x[rs2];
+            if (funct7 == 0u)
+                REG_WRITE(cpu, rd, REG_READ(cpu, rs1) | REG_READ(cpu, rs2));
             else cpu->status = RV32_FAULT_ILLEGAL_INSTRUCTION;
             break;
         case 7u:
-            if (funct7 == 0u) cpu->x[rd] = cpu->x[rs1] & cpu->x[rs2];
+            if (funct7 == 0u)
+                REG_WRITE(cpu, rd, REG_READ(cpu, rs1) & REG_READ(cpu, rs2));
             else cpu->status = RV32_FAULT_ILLEGAL_INSTRUCTION;
             break;
         default: cpu->status = RV32_FAULT_ILLEGAL_INSTRUCTION; break;
@@ -217,7 +254,7 @@ rv32_status_t rv32_step(rv32_cpu_t *cpu)
 
     case RV32_OPCODE_LOAD:
     {
-        uint32_t address = cpu->x[rs1] +
+        uint32_t address = REG_READ(cpu, rs1) +
                            sign_extend(instruction >> 20u, 12u);
         uint8_t width;
 
@@ -235,15 +272,16 @@ rv32_status_t rv32_step(rv32_cpu_t *cpu)
         else if (!address_valid(cpu, address, width))
             cpu->status = RV32_FAULT_LOAD;
         else if (funct3 == 0u)
-            cpu->x[rd] = sign_extend(cpu->memory[address], 8u);
+            REG_WRITE(cpu, rd, sign_extend(cpu->memory[address], 8u));
         else if (funct3 == 1u)
-            cpu->x[rd] = sign_extend(load_u16(cpu->memory, address), 16u);
+            REG_WRITE(cpu, rd,
+                      sign_extend(load_u16(cpu->memory, address), 16u));
         else if (funct3 == 2u)
-            cpu->x[rd] = load_u32(cpu->memory, address);
+            REG_WRITE(cpu, rd, load_u32(cpu->memory, address));
         else if (funct3 == 4u)
-            cpu->x[rd] = cpu->memory[address];
+            REG_WRITE(cpu, rd, cpu->memory[address]);
         else
-            cpu->x[rd] = load_u16(cpu->memory, address);
+            REG_WRITE(cpu, rd, load_u16(cpu->memory, address));
         break;
     }
 
@@ -251,7 +289,7 @@ rv32_status_t rv32_step(rv32_cpu_t *cpu)
     {
         uint32_t immediate = ((instruction >> 7u) & 0x1fu) |
                              (((instruction >> 25u) & 0x7fu) << 5u);
-        uint32_t address = cpu->x[rs1] + sign_extend(immediate, 12u);
+        uint32_t address = REG_READ(cpu, rs1) + sign_extend(immediate, 12u);
         uint8_t width;
 
         if (funct3 == 0u) width = 1u;
@@ -268,11 +306,11 @@ rv32_status_t rv32_step(rv32_cpu_t *cpu)
         else if (!address_valid(cpu, address, width))
             cpu->status = RV32_FAULT_STORE;
         else if (width == 1u)
-            cpu->memory[address] = (uint8_t)cpu->x[rs2];
+            cpu->memory[address] = (uint8_t)REG_READ(cpu, rs2);
         else if (width == 2u)
-            store_u16(cpu->memory, address, (uint16_t)cpu->x[rs2]);
+            store_u16(cpu->memory, address, (uint16_t)REG_READ(cpu, rs2));
         else
-            store_u32(cpu->memory, address, cpu->x[rs2]);
+            store_u32(cpu->memory, address, REG_READ(cpu, rs2));
         break;
     }
 
@@ -287,12 +325,16 @@ rv32_status_t rv32_step(rv32_cpu_t *cpu)
 
         switch (funct3)
         {
-        case 0u: taken = cpu->x[rs1] == cpu->x[rs2]; break;
-        case 1u: taken = cpu->x[rs1] != cpu->x[rs2]; break;
-        case 4u: taken = signed_less_than(cpu->x[rs1], cpu->x[rs2]); break;
-        case 5u: taken = !signed_less_than(cpu->x[rs1], cpu->x[rs2]); break;
-        case 6u: taken = cpu->x[rs1] < cpu->x[rs2]; break;
-        case 7u: taken = cpu->x[rs1] >= cpu->x[rs2]; break;
+        case 0u: taken = REG_READ(cpu, rs1) == REG_READ(cpu, rs2); break;
+        case 1u: taken = REG_READ(cpu, rs1) != REG_READ(cpu, rs2); break;
+        case 4u:
+            taken = signed_less_than(REG_READ(cpu, rs1), REG_READ(cpu, rs2));
+            break;
+        case 5u:
+            taken = !signed_less_than(REG_READ(cpu, rs1), REG_READ(cpu, rs2));
+            break;
+        case 6u: taken = REG_READ(cpu, rs1) < REG_READ(cpu, rs2); break;
+        case 7u: taken = REG_READ(cpu, rs1) >= REG_READ(cpu, rs2); break;
         default: cpu->status = RV32_FAULT_ILLEGAL_INSTRUCTION; break;
         }
 
@@ -315,7 +357,7 @@ rv32_status_t rv32_step(rv32_cpu_t *cpu)
         if (!target_aligned(target)) cpu->status = RV32_FAULT_MISALIGNED;
         else
         {
-            cpu->x[rd] = next_pc;
+            REG_WRITE(cpu, rd, next_pc);
             next_pc = target;
         }
         break;
@@ -323,14 +365,14 @@ rv32_status_t rv32_step(rv32_cpu_t *cpu)
 
     case RV32_OPCODE_JALR:
     {
-        uint32_t target = (cpu->x[rs1] +
+        uint32_t target = (REG_READ(cpu, rs1) +
                            sign_extend(instruction >> 20u, 12u)) & ~1UL;
 
         if (funct3 != 0u) cpu->status = RV32_FAULT_ILLEGAL_INSTRUCTION;
         else if (!target_aligned(target)) cpu->status = RV32_FAULT_MISALIGNED;
         else
         {
-            cpu->x[rd] = next_pc;
+            REG_WRITE(cpu, rd, next_pc);
             next_pc = target;
         }
         break;
@@ -354,7 +396,7 @@ rv32_status_t rv32_step(rv32_cpu_t *cpu)
         break;
     }
 
-    cpu->x[0] = 0u;
+    rv32_compat_zero_x0(cpu->x);
     if (cpu->status == RV32_RUNNING || cpu->status == RV32_PAUSED)
     {
         cpu->pc = next_pc;

@@ -22,7 +22,10 @@ typedef rv32_status_t (*rv32_ecall_handler_t)(struct rv32_cpu *cpu,
 
 typedef struct rv32_cpu
 {
-    uint32_t x[32];
+    /* ECALL callbacks and the host scheduler both inspect and update the
+     * emulated register file between instruction slices.  Keep those loads
+     * and stores observable across whole-program optimization. */
+    volatile uint32_t x[32];
     uint32_t pc;
     uint8_t *memory;
     uint16_t memory_size;
@@ -34,5 +37,7 @@ typedef struct rv32_cpu
 void rv32_init(rv32_cpu_t *cpu, uint8_t *memory, uint16_t memory_size);
 rv32_status_t rv32_step(rv32_cpu_t *cpu);
 rv32_status_t rv32_run(rv32_cpu_t *cpu, uint16_t instruction_budget);
+uint32_t rv32_register_read(const rv32_cpu_t *cpu, uint8_t index);
+void rv32_register_write(rv32_cpu_t *cpu, uint8_t index, uint32_t value);
 
 #endif

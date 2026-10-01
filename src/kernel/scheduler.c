@@ -9,7 +9,11 @@
 
 #define STACK_FILL_BYTE 0xa5u
 #define STACK_GUARD_BYTE 0xd3u
+#if LGT_SAFE_MODE
+#define INITIAL_SREG 0u
+#else
 #define INITIAL_SREG (1u << SREG_I)
+#endif
 
 _Static_assert(sizeof(task_t) == 16u,
                "task_t layout changed; verify context.S and SRAM budget");
@@ -225,6 +229,14 @@ void scheduler_init(task_t *tasks, uint8_t task_count)
 
 void task_sleep(uint32_t delay_ms)
 {
+#if LGT_SAFE_MODE
+    if (delay_ms == 0u)
+    {
+        return;
+    }
+    timer_delay_ms(delay_ms);
+    return;
+#else
     uint8_t saved_sreg;
 
     if (delay_ms == 0u)
@@ -243,6 +255,7 @@ void task_sleep(uint32_t delay_ms)
     SREG = saved_sreg;
 
     task_yield();
+#endif
 }
 
 void task_exit(void)

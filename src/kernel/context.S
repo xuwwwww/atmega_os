@@ -6,6 +6,7 @@
 .extern g_current_task
 .extern scheduler_select_next
 .extern scheduler_tick
+.extern timer_poll
 
 /*
  * Stack after CONTEXT_SAVE, from high address to low address:
@@ -136,11 +137,18 @@
 
 .type task_yield, @function
 task_yield:
+#if LGT_SAFE_MODE
+    /* A safe-mode build has one native task.  Yielding the emulated CPU does
+     * not require touching the AVR stack pointer.  Tail-call the polled time
+     * service so long-running guests still advance the millisecond clock. */
+    jmp timer_poll
+#else
     CONTEXT_SAVE
     CONTEXT_LOAD_KERNEL_STACK
     call scheduler_select_next
     CONTEXT_RESTORE
     ret
+#endif
 .size task_yield, .-task_yield
 
 .type scheduler_start, @function
@@ -150,6 +158,7 @@ scheduler_start:
     ret
 .size scheduler_start, .-scheduler_start
 
+#if !LGT_SAFE_MODE
 /* Naked Timer2 ISR: the hardware-pushed PC is part of the task context, so a
  * single RETI can resume either an interrupted or a never-run task. */
 .type TIMER2_COMPA_vect, @function
@@ -160,3 +169,4 @@ TIMER2_COMPA_vect:
     CONTEXT_RESTORE
     reti
 .size TIMER2_COMPA_vect, .-TIMER2_COMPA_vect
+#endif

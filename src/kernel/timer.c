@@ -2,7 +2,9 @@
 
 #include <avr/interrupt.h>
 #include <avr/io.h>
+#include <avr/wdt.h>
 #include <stdint.h>
+#include <util/delay_basic.h>
 
 #ifndef KERNEL_TICK_HZ
 #define KERNEL_TICK_HZ 1000UL
@@ -35,11 +37,44 @@ void timer_init(void)
 {
     TCNT2 = 0u;
     TIFR2 = (1u << OCF2A);
+#if LGT_SAFE_MODE
+    /* Keep the known-problematic LGT timer completely stopped.  Safe mode
+     * advances time with calibrated CPU delay loops instead. */
+    TCCR2A = 0u;
+    TCCR2B = 0u;
+    OCR2A = 0u;
+    TIMSK2 = 0u;
+#else
     TCCR2A = (1u << WGM21);
     /* Timer2 encodes /64 as CS22=1, unlike Timer0's CS01|CS00. */
     TCCR2B = (1u << CS22);
     OCR2A = (uint8_t)(TIMER2_COUNTS - 1UL);
     TIMSK2 = (1u << OCIE2A);
+#endif
+}
+
+void timer_poll(void)
+{
+}
+
+void timer_delay_ms(uint32_t delay_ms)
+{
+#if LGT_SAFE_MODE
+    while (delay_ms-- != 0u)
+    {
+        /* Keep the LGT safe-mode supervisor alive while no UART operation is
+         * occurring.  Hardware timer access on this clone is intentionally
+         * avoided until the firmware uses the matching LGT device support. */
+        wdt_reset();
+        _delay_loop_2((uint16_t)(F_CPU / 4000UL));
+        g_millis++;
+    }
+#else
+    uint32_t started_at = timer_millis();
+    while ((uint32_t)(timer_millis() - started_at) < delay_ms)
+    {
+    }
+#endif
 }
 
 uint32_t timer_millis(void)
@@ -47,6 +82,7 @@ uint32_t timer_millis(void)
     uint32_t millis;
     uint8_t saved_sreg = SREG;
 
+    timer_poll();
     cli();
     millis = g_millis;
     SREG = saved_sreg;

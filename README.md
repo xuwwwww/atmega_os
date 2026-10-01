@@ -4,7 +4,28 @@
 
 - Arduino Uno Type-C 相容板
 - ATmega328P 相容核心（本板為 LGT8F328P 類相容晶片），16 MHz
-- UART0，115200 baud，8-N-1
+- UART0，4800 baud，8-N-1（bootloader upload 仍為 115200）
+
+目前也有一個雙板 distributed profile：COM5 Uno 作 coordinator，COM9 Nano
+作 RV32I worker，兩板以 A4/SDA、A5/SCL、GND 連接。日常流程：
+
+```bash
+make nodes-upload
+make guests-uno GUEST_CS='guest-riscv/workloads/*.c'
+make monitor PORT=COM5
+```
+
+```text
+uno$ ls
+uno$ run checksum
+uno$ jobs
+uno$ kill
+```
+
+`guest-riscv/` 是獨立的 guest source repository；PC 以 RISC-V cross compiler
+產生最長 192-byte 的 image，UART 載入 Uno SRAM，再由 Uno 經 I2C 部署到 Nano。
+完整架構、接線、shell 與實機除錯紀錄見
+[`docs/os-guide.md`](docs/os-guide.md)。
 
 目前已有：
 
@@ -144,14 +165,51 @@ ATmega OS UART ready
 可列出 shell 指令。週期性的 `kernel alive` 和 stack report 已移除，需要
 資訊時使用 `uptime`、`tasks`、`stack`。按 `Ctrl+]` 或 `Ctrl+C` 離開。
 
-`screen /dev/ttyACM0 115200` 看似卡住，是因為 screen 本來就會佔據終端，而且這塊 USB bridge 經 usbipd 傳到 WSL 後目前收不到 UART byte。若使用其他相容的 USB-Serial adapter，仍可測試：
+`screen /dev/ttyACM0 4800` 看似卡住，是因為 screen 本來就會佔據終端，而且這塊 USB bridge 經 usbipd 傳到 WSL 後目前收不到 UART byte。若使用其他相容的 USB-Serial adapter，仍可測試：
 
 ```bash
 make upload-wsl WSL_PORT=/dev/ttyACM0
-screen /dev/ttyACM0 115200
+screen /dev/ttyACM0 4800
 ```
 
 screen 的離開方式是依序按 `Ctrl+A`、`K`、`Y`，不是 `Ctrl+C`。
+
+## 從根目錄編譯與執行 RISC-V Guest
+
+不必切換到 `guest-riscv/`：
+
+```bash
+make guest-build       # 編譯第一個 C guest
+make guest-run         # 編譯、載入 slot 0、執行
+make guest-inspect     # 看 binary 與 RV32I disassembly
+make guest2-build      # 編譯第二個 C guest
+make guest2-load       # 載入 slot 1，但不執行
+make guest-dual-run    # 載入兩個 guest，以 4-instruction quantum 交錯執行
+```
+
+現行具名介面也可以指定任意 C 檔或用 wildcard（每個檔案是獨立 guest）：
+
+```bash
+make guest-upload GUEST_C=guest-riscv/src/second.c
+make guest-selected-upload GUEST_CS='guest-riscv/src/*.c'
+make monitor
+```
+
+接著在 `os>` 使用 `guest list`、`guest second -run`、
+`guest second -priority 3`、`guest prefix on` 或 `guest -runall`。可直接跑三個
+多步驟範例：
+
+```bash
+make guest-selected-upload GUEST_CS='guest-riscv/workloads/*.c'
+make monitor
+```
+
+目前 Uno safe build 預設最多三個
+resident guest；這是 2 KB SRAM 與 AVR stack 餘裕造成的硬體上限。
+
+Guest runtime upload 只改 SRAM，不會重燒 AVR firmware，reset 或斷電後就消失。
+詳細的 slot 記憶體配置、`guest-riscv/src/main.c` 逐行說明、shell protocol 與
+guest-level preemption 請見 [`docs/os-guide.md`](docs/os-guide.md) 最後一章。
 
 ## 下一步
 

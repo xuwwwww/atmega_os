@@ -50,12 +50,58 @@ uint8_t kernel_last_panic(uint8_t *code, uint8_t *detail)
 
     *code = g_panic_record.code;
     *detail = g_panic_record.detail;
+    /* Do not attribute one old panic to every later reset. */
+    g_panic_record.magic_a = 0u;
     return 1u;
 }
 
+#if LGT_SAFE_MODE
+/* Safe mode keeps SREG.I clear, so reaching any hardware vector is itself a
+ * kernel invariant violation.  Never RET from an unexplained LGT vector:
+ * some clone paths may jump here without pushing a valid return PC, in which
+ * case RET consumes ordinary C stack bytes and sends control flow anywhere. */
+#define IGNORE_VECTOR(number)                                               \
+    ISR(__vector_##number, ISR_NAKED)                                      \
+    {                                                                       \
+        __asm__ __volatile__("cli\n\tclr r1\n\tldi r24, 3\n\t"              \
+                             "ldi r22, " #number "\n\t"                     \
+                             "jmp kernel_panic\n\t");                       \
+    }
+
+IGNORE_VECTOR(1)
+IGNORE_VECTOR(2)
+IGNORE_VECTOR(3)
+IGNORE_VECTOR(4)
+IGNORE_VECTOR(5)
+IGNORE_VECTOR(6)
+IGNORE_VECTOR(7)
+IGNORE_VECTOR(8)
+IGNORE_VECTOR(9)
+IGNORE_VECTOR(10)
+IGNORE_VECTOR(11)
+IGNORE_VECTOR(12)
+IGNORE_VECTOR(13)
+#if !NODE_ROLE
+IGNORE_VECTOR(14)
+#endif
+IGNORE_VECTOR(15)
+IGNORE_VECTOR(16)
+IGNORE_VECTOR(17)
+IGNORE_VECTOR(18)
+IGNORE_VECTOR(19)
+IGNORE_VECTOR(20)
+IGNORE_VECTOR(21)
+IGNORE_VECTOR(22)
+IGNORE_VECTOR(23)
+#if NODE_ROLE != 2
+IGNORE_VECTOR(24)
+#endif
+IGNORE_VECTOR(25)
+
+#undef IGNORE_VECTOR
+#else
 /* avr-libc normally maps every ISR without a handler to __bad_interrupt,
- * which jumps to address zero.  That looks like a reboot but does not set a
- * bit in MCUSR.  Turn it into a visible kernel fault instead. */
+ * which jumps to address zero.  Turn it into a visible kernel fault instead. */
 ISR(BADISR_vect)
 {
     kernel_panic(PANIC_UNHANDLED_INTERRUPT, 0u);
@@ -93,6 +139,7 @@ PANIC_VECTOR(24)
 PANIC_VECTOR(25)
 
 #undef PANIC_VECTOR
+#endif
 
 void kernel_panic(uint8_t code, uint8_t detail)
 {
@@ -115,5 +162,16 @@ void kernel_panic(uint8_t code, uint8_t detail)
     TCCR2B = 0u;
     __asm__ __volatile__("jmp 0" ::: "memory");
 
+    __builtin_unreachable();
+}
+
+void kernel_reboot(void)
+{
+    cli();
+    wdt_disable();
+    UCSR0B = 0u;
+    TIMSK2 = 0u;
+    TCCR2B = 0u;
+    __asm__ __volatile__("jmp 0" ::: "memory");
     __builtin_unreachable();
 }
