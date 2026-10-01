@@ -1,0 +1,3 @@
+[submodule "guest-riscv"]
+	path = guest-riscv
+	url = https://github.com/xuwwwww/atmega_os-guest-riscv.git
