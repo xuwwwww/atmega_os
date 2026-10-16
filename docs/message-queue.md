@@ -1,145 +1,52 @@
-# 固定容量 Message Queue
+# Fixed-storage message queues
 
-## 目的
+The kernel message queue moves fixed-size records between native AVR tasks without dynamic allocation. The caller owns the backing array, so its SRAM cost is known at link time.
 
-Semaphore 只能傳遞 token；message queue 能在 task 之間傳遞固定大小的資料。
-本實作完全不使用 `malloc()`，queue object 與 payload storage 都由呼叫者配置。
+## Model
 
-```c
-typedef struct
-{
-    uint8_t command;
-    uint16_t value;
-} command_t;
+A queue contains:
 
-static message_queue_t command_queue;
-static command_t command_storage[4];
+- a caller-provided byte buffer;
+- a fixed item size and item count;
+- read and write positions;
+- a mutex protecting the ring-buffer metadata;
+- a counting semaphore for free slots;
+- a counting semaphore for available items.
 
-message_queue_init(&command_queue, command_storage, 4u,
-                   sizeof(command_t));
-```
+Sending waits for a free slot, locks the queue, copies one record, advances the write position, unlocks, and signals that an item exists. Receiving performs the inverse operation.
 
-`message_queue_t` 在 AVR 上固定是 16 bytes：
+## Why storage is supplied by the caller
 
-```text
-storage pointer                 2
-item_size/capacity/head/tail    4
-mutex                           4
-items semaphore                 3
-spaces semaphore                3
-                              ----
-                                16 bytes
-```
-
-Storage 另占 `capacity * item_size` bytes。Queue 和 storage 必須具有永久
-lifetime，例如 static/global；不能建立在即將 return 的函式 stack 上。
-
-## Send 與 receive
-
-初始化容量為 N 時：
-
-```text
-items.count  = 0
-spaces.count = N
-```
-
-Send：
-
-```text
-take spaces       queue 滿時 BLOCKED
-lock mutex
-copy item 到 head
-head 循環前進
-unlock mutex
-give items        喚醒 receiver
-```
-
-Receive：
-
-```text
-take items        queue 空時 BLOCKED
-lock mutex
-從 tail copy item
-tail 循環前進
-unlock mutex
-give spaces       喚醒 sender
-```
-
-Mutex 只在 copy 和 index 更新期間持有，並具有 priority inheritance。
-
-## API
-
-永久等待：
+There is no heap allocator in this project. Static storage avoids fragmentation and makes the final SRAM report meaningful. For example:
 
 ```c
-message_queue_send(&queue, &message);
-message_queue_receive(&queue, &message);
+static uint8_t storage[4][8];
+static message_queue_t queue;
+
+message_queue_init(&queue, storage, 8u, 4u);
 ```
 
-限時等待：
+This queue holds four eight-byte records. Its payload cost is exactly 32 bytes plus the queue control object and synchronization objects.
 
-```c
-wait_result_t result =
-    message_queue_send_timeout(&queue, &message, 100u);
+## Blocking and timeout operations
 
-result = message_queue_receive_timeout(&queue, &message, 100u);
-```
+The API provides blocking, timed, and nonblocking forms. A timeout of zero is suitable for a try operation. Timed waits use wrap-safe millisecond comparisons and return without modifying the queue if the deadline expires.
 
-完全不等待：
+The current queue API is task context only. It is not safe to call the blocking operations from an interrupt service routine.
 
-```c
-if (!message_queue_try_send(&queue, &message))
-{
-    /* queue full 或 mutex 當下忙碌 */
-}
+## Concurrency rules
 
-if (!message_queue_try_receive(&queue, &message))
-{
-    /* queue empty 或 mutex 當下忙碌 */
-}
-```
+- Never access the backing array directly after initialization.
+- Do not hold an unrelated mutex while waiting indefinitely on a queue unless the lock order is documented.
+- Keep records small on the ATmega328P; copying a large record increases interrupt latency and SRAM pressure.
+- Queue storage must remain alive for the entire lifetime of the queue.
 
-Timeout 目前限制的是等待 item/space 的時間。取得 semaphore token 後，內部
-queue mutex 採永久等待；這個 mutex 只保護很短的固定大小 copy，不應在正常
-使用下造成長時間延遲。
+## Testing
 
-## 為什麼現在沒有 ISR API
+The host tests cover ring wraparound, full and empty behavior, timeouts, and ordering. Run:
 
-ISR 不可呼叫上述 blocking API，因為 ISR 不能等待 mutex 或執行
-`task_yield()`。未來的 `message_queue_send_from_isr()` 必須立即成功或失敗，
-並需要限制 item size 或使用專門的 single-producer/single-consumer 路徑，
-避免在關 interrupt 時複製過大的 message。
-
-## 測試
-
-Host FIFO、full/empty、wraparound、try 和 timeout 測試：
-
-```bash
+```sh
 make test
 ```
 
-板上 producer/consumer self-test：
-
-```bash
-make clean all EXTRA_CFLAGS=-DMESSAGE_QUEUE_SELF_TEST
-make upload EXTRA_CFLAGS=-DMESSAGE_QUEUE_SELF_TEST
-make monitor
-```
-
-輸出定義：
-
-```text
-Q  一組 8 個 sequence 全部依 FIFO 順序收到
-T  consumer 在空 queue 上正確 timeout
-E  順序或 wait result 錯誤
-```
-
-測試 queue 容量只有 3，producer 一次送 8 筆，因此會實際走過 full queue、
-sender BLOCKED、receiver 喚醒 sender、empty queue 與 receive timeout。
-
-測完恢復正式 build：
-
-```bash
-make clean all
-make upload
-```
+The firmware self-test can additionally exercise queue behavior on real AVR hardware when its build flag is enabled.

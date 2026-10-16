@@ -1,69 +1,44 @@
-# Build-time Huffman UART log
+# Huffman-compressed UART output
 
-## 目標
+The AVR has little Flash and SRAM, so fixed firmware messages are compressed at build time. The decoder runs on the PC, not on the Arduino. Interactive text and binary guest uploads use separate framing and are not forced through the Huffman codec.
 
-固定 log 在筆電 build 時壓縮，AVR 只保存並傳送壓縮 bitstream；解碼器位於
-WSL/Python monitor，不占 MCU Flash decoder code 或 SRAM buffer。
+## Build pipeline
 
-```text
-tools/log_messages.json
-        ↓ generate_log_codec.py（筆電）
-        ├─ src/generated/log_messages.c/h：AVR PROGMEM payload
-        └─ tools/generated_log_codec.py：筆電 decode table
+1. Fixed messages are listed in the logging manifest.
+2. The generator builds one shared Huffman codebook.
+3. It writes the generated C tables used by the firmware and the matching Python table used by the serial monitor.
+4. Firmware sends a framed bit stream; the PC reconstructs the original text.
+
+The firmware and host decoder must always come from the same build. A stale decoder can report `invalid huffman frame` even when the UART bytes are electrically correct.
+
+Run the codec tests with:
+
+```sh
+make test-codec
 ```
 
-修改 `tools/log_messages.json` 後執行 `make`，Makefile 會在編譯 C source 前
-重新產生三個檔案。generated files 不應手動修改。
+## Stream framing
 
-## 目前壓縮結果
+The monitor consumes a byte stream incrementally, so a frame may be split across several serial reads.
 
-```text
-訊息                         原始 bytes   Huffman bits   payload bytes
-ATmega OS UART ready...          24           126             16
-shell ready...                   24           118             15
-os> prompt                        4            19              3
-shell help                      191          1028            129
-```
+- Ordinary nonzero bytes are raw text.
+- `00 00` represents a literal zero byte.
+- `00 01 <bit-count-low> <bit-count-high> <payload...>` is a Huffman frame.
+- `00 03 <length> <payload...>` is a length-delimited dynamic-text frame.
 
-manifest 目前共有 9 個固定 shell 訊息。payload 使用 `PROGMEM`，位於
-`.text`/Flash，因此不占 SRAM `.data`；週期性的 `kernel alive` 已移除。
+Fixed strings benefit most from compression. Shell prompts, command echoes, guest names, numbers, and other runtime-generated data use raw or length-delimited output.
 
-## UART framing
+## Why changing one message changes the table
 
-UART 是 byte stream，本身沒有 message boundary。協定使用 `0x00` 作為
-escape：
+Huffman coding assigns shorter bit patterns to frequent symbols. Adding or removing a message changes the frequency distribution and can therefore change every code. The generator deliberately rebuilds both sides together.
 
-```text
-raw nonzero byte       BYTE
-raw zero byte          00 00
-compressed log frame   00 01 BITS_LO BITS_HI PAYLOAD...
-```
+## Failure diagnosis
 
-payload 長度由 `(bit_count + 7) / 8` 算出，因此不需要再傳 byte count。
-最後一個 byte 沒用到的低位 bits 填 0，host decoder 只讀 bit_count 指定的
-有效 bits。
+If the monitor reports an invalid frame:
 
-PowerShell helper 現在只負責以 binary stream 搬運 COM bytes；Python
-`SerialDecoder` 保存跨 read 的 frame state。即使一個 frame 被 Windows
-拆成數次 read，decoder 仍會等待完整 payload 才解碼。
+1. Stop every process that owns the COM port.
+2. Rebuild the firmware and generated decoder from the same checkout.
+3. Flash the new firmware.
+4. Start the repository's monitor again.
 
-## 固定與動態資料
-
-Huffman tree 只根據 manifest 裡的固定訊息建立。固定 log 可以直接傳預先
-編碼的 payload；shell 的逐字 echo 是任意輸入，仍走 raw byte escaping。
-
-如果未來要傳數字或 task stats，應增加新的 frame type，例如：
-
-```text
-00 02 LENGTH BINARY_PAYLOAD
-```
-
-由 host 格式化成人類文字，避免 MCU 保存格式字串或連結 `printf`。
-
-`0x02` 保留給 binary stack report，`0x03` 是動態 shell text。正式 firmware
-已移除週期性 output task，`tasks` 與 `stack` 改由 shell 按需傳送 `0x03`
-frame，因此 monitor 不會在輸入中途插入週期報告。舊 `0x02` decoder 仍保留，
-方便 self-test 或未來診斷使用。
-
-可用 `make test-codec` 在不連接 Arduino 的情況下測試所有 manifest 訊息、
-逐 byte 分段解碼，以及 raw NUL escaping。
+Do not decode arbitrary binary loader traffic as text. Loader mode has its own framing, CRC, acknowledgement, and retry rules.

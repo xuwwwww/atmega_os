@@ -1,13 +1,17 @@
-# ATmega_OS
+# ATmega OS
 
-這是一個用來學習 AVR bare-metal 與作業系統核心概念的專案。目前目標板是：
+ATmega OS is an educational bare-metal operating-system project for 16 MHz
+ATmega328P-compatible boards. It combines three related experiments:
 
-- Arduino Uno Type-C 相容板
-- ATmega328P 相容核心（本板為 LGT8F328P 類相容晶片），16 MHz
-- UART0，4800 baud，8-N-1（bootloader upload 仍為 115200）
+- a stackful preemptive AVR kernel;
+- a small RV32I interpreter that runs freestanding RISC-V guests from SRAM;
+- a two-board distributed profile in which an Uno coordinates a Nano over I2C.
 
-目前也有一個雙板 distributed profile：COM5 Uno 作 coordinator，COM9 Nano
-作 RV32I worker，兩板以 A4/SDA、A5/SCL、GND 連接。日常流程：
+The current hardware setup uses a genuine Uno on `COM5` as the coordinator and
+a Nano on `COM9` as the worker. Connect A4/SDA to A4/SDA, A5/SCL to A5/SCL,
+and GND to GND. Each board remains powered by its own USB cable.
+
+## Quick start: two-node profile
 
 ```bash
 make nodes-upload
@@ -15,98 +19,95 @@ make guests-uno GUEST_CS='guest-riscv/workloads/*.c'
 make monitor PORT=COM5
 ```
 
+The coordinator presents a small Unix-style shell:
+
 ```text
 uno$ ls
 uno$ run checksum
 uno$ jobs
 uno$ kill
+uno$ man run
 ```
 
-`guest-riscv/` 是獨立的 guest source repository；PC 以 RISC-V cross compiler
-產生最長 192-byte 的 image，UART 載入 Uno SRAM，再由 Uno 經 I2C 部署到 Nano。
-完整架構、接線、shell 與實機除錯紀錄見
-[`docs/os-guide.md`](docs/os-guide.md)。
+`guest-riscv/` is a Git submodule containing the freestanding guest sources.
+The PC cross compiler produces an RV32I image no larger than 192 bytes. The
+uploader stores named images in Uno SRAM; the Uno deploys a selected image over
+I2C, and the Nano interprets it.
 
-目前已有：
+Clone both repositories with:
 
-- Timer2：預設每 0.5 ms 產生 scheduler tick，可在 build 時調整
-- stackful preemptive scheduler：每個 task 有獨立 SRAM stack
-- 4 級 fixed-priority scheduling，同優先權 task 使用 round-robin
-- AVR assembly context switch：保存 r0-r31、SREG 與 stack pointer
-- task state：READY、RUNNING、SLEEPING、BLOCKED、TERMINATED
-- `task_sleep(ms)` 與 wrap-safe wake time
-- idle task：保證 scheduler 永遠有可執行的 context
-- task entry 可以 return，經預置 return address 自動進入 `task_exit()`
-- `task_restart(index)` 可重建已 TERMINATED task 的初始 stack frame
-- compact 16-byte TCB：priority、stack metadata 與 timed-wait cleanup
-- build-time Huffman fixed logs：AVR 只傳壓縮 frame，筆電 monitor 解碼
-- LED task
-- UART RX/TX interrupt 與各 32-byte ring buffer
-- 3-byte counting semaphore 與 8-task waiter bitmap
-- 4-byte non-recursive mutex：owner validation、priority inheritance 與 handoff
-- semaphore、mutex 與 UART receive blocking timeout
-- 固定容量 message queue：FIFO、try、blocking 與 timeout API
-- 12-byte event flags：wait-any、wait-all、auto-clear、timeout 與 ISR set
-- UART shell task：查 uptime、task 狀態、stack 水位、控制 LED 與 restart task
-- 4-byte stack guard、UART panic frame、`.noinit` panic record 與 software reboot
-- one-shot/periodic software timer 與 deferred callback timer-service task
+```bash
+git clone --recurse-submodules https://github.com/xuwwwww/atmega_os.git
+```
 
-## 專案結構
+## Implemented features
+
+### Native AVR kernel
+
+- Timer2 scheduler tick, configurable with `KERNEL_TICK_HZ`;
+- stackful preemptive tasks with private SRAM stacks;
+- four fixed-priority levels and round-robin selection within a level;
+- AVR assembly context switching for `r0`-`r31`, SREG, and SP;
+- READY, RUNNING, SLEEPING, BLOCKED, and TERMINATED states;
+- wrap-safe sleep and timed waits;
+- task return, exit, and restart support;
+- compact TCBs and stack watermarks;
+- counting semaphores and non-recursive mutexes with priority inheritance;
+- fixed-capacity message queues and event flags;
+- one-shot and periodic software timers with deferred callbacks;
+- stack guards, UART panic frames, `.noinit` panic records, and reboot support.
+
+### UART and shell
+
+- RX/TX ring buffers;
+- binary framing with raw-byte escaping;
+- build-time Huffman compression for fixed messages;
+- host-side decoding in the Python monitor;
+- command history maintained on the PC;
+- role-aware `uno$`, `nano$`, and `os$` prompts.
+
+### RV32I and distributed execution
+
+- an RV32I register file, virtual PC, and 192-byte guest address space;
+- fetch/decode/execute for the base integer instructions needed by the guests;
+- ECALL services for output, yield, sleep, and exit;
+- named SRAM images with size, CRC, priority, and entry-point metadata;
+- binary UART loading with chunk CRC, acknowledgement, and retry;
+- I2C image deployment, whole-image verification, execution, cancellation,
+  timeout handling, and job-ID deduplication;
+- `run --all`, repeated runs, two-run result verification, and recent results.
+
+## Repository layout
 
 ```text
 src/
-├── drivers/        硬體驅動，例如 UART
-├── kernel/         timer 與 scheduler
-├── tasks/          使用核心服務的工作
-└── main.c          初始化與 task 註冊
-tools/
-└── serial-monitor.ps1
+├── drivers/        AVR hardware drivers
+├── generated/      generated compressed message payloads
+├── kernel/         scheduler, IPC, timers, panic, and node protocol
+├── tasks/          shell, VM service, LED, and test tasks
+├── vm/             RV32I interpreter
+└── main.c          boot and profile initialization
+guest-riscv/        freestanding RV32I guest submodule
+tools/              uploaders, monitor, generators, and host tests
+docs/               design and tutorial documents
 ```
 
-每個 task 依需求配置固定 SRAM stack，並以無限迴圈執行。task 呼叫
-`task_yield()` 後，assembly 會保存 CPU context、切換 SP，再恢復下一個
-task。現在是 0.5 ms time slice 的 fixed-priority preemptive scheduling；
-同優先權之間使用 round-robin。Timer2 ISR 可以搶占沒有主動呼叫
-`task_yield()` 的 task。`task_yield()` 與
-`task_sleep()` 仍可用於提早交出 CPU。
+## Build
 
-UART ISR 只在硬體與 ring buffer 之間搬移 byte，並 give RX semaphore；echo
-task 沒資料時會進入 BLOCKED，不占 time slice。收到 byte 後 ISR 將它改回
-READY，真正的 echo 仍由 task context 完成。
-
-記憶體配置與 context switch 細節請見
-[`docs/memory-and-context-switch.md`](docs/memory-and-context-switch.md)。
-Preemptive tick 與同步原語路線請見
-[`docs/preemptive-scheduler.md`](docs/preemptive-scheduler.md)。
-Huffman build pipeline 與 UART framing 請見
-[`docs/huffman-uart.md`](docs/huffman-uart.md)。
-Timer 選擇、頻率與桌面 OS 的差異請見
-[`docs/timers.md`](docs/timers.md)。
-Message queue 結構與同步流程請見
-[`docs/message-queue.md`](docs/message-queue.md)。
-目前整個 OS、event flags、software timer、shell、RV32I emulator 與 SRAM 的逐段教學請見
-[`docs/os-guide.md`](docs/os-guide.md)。
-
-## 在 WSL 編譯
+From Ubuntu under WSL:
 
 ```bash
-wsl.exe -d Ubuntu-22.04
-cd /mnt/d/ATmega_OS
+cd /mnt/d/atmega_os
 make clean all
 ```
 
-預設 `KERNEL_TICK_HZ=2000`，也就是 0.5 ms time slice。若要切回 1 ms：
+The default native tick is 2 kHz, or one scheduling opportunity every 0.5 ms:
 
 ```bash
 make clean all KERNEL_TICK_HZ=1000UL
-make upload KERNEL_TICK_HZ=1000UL
 ```
 
-提高 tick rate 會降低最壞排程延遲，但 context save、scheduler 掃描與 ISR
-也會更頻繁。目前 2 kHz 已通過實機測試；`timer_millis()` 仍每一個真正的
-1 ms 才加一，所以既有 sleep 時間不受影響。
-
-五個 task stack 也能在 build 時各自設定：
+Task stack capacities are build-time settings:
 
 ```bash
 make clean all \
@@ -117,102 +118,80 @@ make clean all \
   RV_DEMO_STACK_SIZE=128
 ```
 
-每個值必須大於初始 context frame 的 37 bytes，且不超過 255。不要把
-watermark 的 `unused == 0` 當成最佳化目標；0 代表沒有任何安全餘裕，也
-無法分辨 stack 是否已經越界。先用最壞 workload 測量，再保留至少 16～32
-bytes margin。
+Do not optimize a stack until its unused watermark reaches zero. Zero means
+there is no measured safety margin and overflow may already have occurred.
+Measure the worst workload and retain at least 16-32 bytes of margin.
 
-輸出檔案：
+Build outputs:
 
-- `build/atmega_os.elf`：包含符號資訊，適合除錯
-- `build/atmega_os.hex`：燒錄到晶片的映像
+- `build/atmega_os.elf`: symbols and link information;
+- `build/atmega_os.hex`: AVR flash image;
+- `build/atmega_os.map`: linked memory map.
 
-Makefile 使用已安裝在 `D:\CodexHome\runtime\toolchains\Microchip.ATmega_DFP.3.6.299` 的官方 Microchip Device Family Pack。
+The Makefile uses the installed Microchip ATmega device family pack. Override
+`DFP_DIR` if the pack is installed elsewhere.
 
-## 從 WSL 燒錄
+## Flash and monitor
 
-這塊 FIREPHX USB-Serial 在 WSL USB passthrough 下無法穩定傳輸，因此 USB 保持在 Windows，由 WSL 直接呼叫 Windows AVRDUDE：
-
-```bash
-cd /mnt/d/ATmega_OS
-make upload
-```
-
-預設使用 `COM6`。若 Windows 之後分配其他 COM port：
+The project invokes the Windows AVRDUDE binary from WSL because the tested USB
+serial bridges are more reliable when owned by Windows:
 
 ```bash
-make upload PORT=COM7
+make upload PORT=COM5
+make monitor PORT=COM5
 ```
 
-板子的 bootloader 與 interrupt vector table 都使用 ATmega328P 相容介面，所以編譯與燒錄目標統一使用 `atmega328p` / `m328p`。
+Bootloader upload uses 115200 baud. The application UART uses 4800 baud. Exit
+the monitor with `Ctrl+]` or `Ctrl+C`.
 
-這塊相容板的自動 reset 不穩定。若看到 `programmer is not responding`，在 `make upload` 開始後立刻短按一次 Reset，讓 AVRDUDE 正好遇到 bootloader 的同步時間窗；不需要連按或長按。
-
-## 從 WSL 看 UART 並輸入
+For the distributed profiles:
 
 ```bash
-cd /mnt/d/ATmega_OS
-make monitor
+make nodes-master-upload NODE_MASTER_PORT=COM5
+make nodes-worker-upload NODE_WORKER_PORT=COM9
+make nodes-upload
 ```
 
-啟動時會顯示一次：
+Windows may reassign a COM number after reconnecting a board. Override the
+corresponding Make variable rather than editing the Makefile.
 
-```text
-ATmega OS UART ready
-```
+## Build and load guests
 
-啟動後會顯示 `os> ` prompt。輸入由板子逐字 echo；輸入 `help` 再按 Enter
-可列出 shell 指令。週期性的 `kernel alive` 和 stack report 已移除，需要
-資訊時使用 `uptime`、`tasks`、`stack`。按 `Ctrl+]` 或 `Ctrl+C` 離開。
-
-`screen /dev/ttyACM0 4800` 看似卡住，是因為 screen 本來就會佔據終端，而且這塊 USB bridge 經 usbipd 傳到 WSL 後目前收不到 UART byte。若使用其他相容的 USB-Serial adapter，仍可測試：
+Build one selected C file and upload only its SRAM image:
 
 ```bash
-make upload-wsl WSL_PORT=/dev/ttyACM0
-screen /dev/ttyACM0 4800
+make guest-uno GUEST_C=guest-riscv/workloads/checksum.c
 ```
 
-screen 的離開方式是依序按 `Ctrl+A`、`K`、`Y`，不是 `Ctrl+C`。
-
-## 從根目錄編譯與執行 RISC-V Guest
-
-不必切換到 `guest-riscv/`：
+Build and load multiple independent images through one serial connection:
 
 ```bash
-make guest-build       # 編譯第一個 C guest
-make guest-run         # 編譯、載入 slot 0、執行
-make guest-inspect     # 看 binary 與 RV32I disassembly
-make guest2-build      # 編譯第二個 C guest
-make guest2-load       # 載入 slot 1，但不執行
-make guest-dual-run    # 載入兩個 guest，以 4-instruction quantum 交錯執行
+make guests-uno GUEST_CS='guest-riscv/workloads/*.c'
 ```
 
-現行具名介面也可以指定任意 C 檔或用 wildcard（每個檔案是獨立 guest）：
+Runtime upload does not rewrite AVR flash. Uploaded images disappear when the
+Uno resets or loses power. A Nano cache is also volatile; the Uno redeploys a
+missing or mismatched image on the next `run` command.
+
+## Tests
 
 ```bash
-make guest-upload GUEST_C=guest-riscv/src/second.c
-make guest-selected-upload GUEST_CS='guest-riscv/src/*.c'
-make monitor
+make test
+make nodes-build
 ```
 
-接著在 `os>` 使用 `guest list`、`guest second -run`、
-`guest second -priority 3`、`guest prefix on` 或 `guest -runall`。可直接跑三個
-多步驟範例：
+The host suite covers message framing and compression, event flags, queues,
+software timers, RV32I execution, guest upload packets, hardware-regression
+parsing, and the distributed job protocol.
 
-```bash
-make guest-selected-upload GUEST_CS='guest-riscv/workloads/*.c'
-make monitor
-```
+## Documentation
 
-目前 Uno safe build 預設最多三個
-resident guest；這是 2 KB SRAM 與 AVR stack 餘裕造成的硬體上限。
+- [Full system guide](docs/os-guide.md)
+- [Memory and context switching](docs/memory-and-context-switch.md)
+- [Preemptive scheduler](docs/preemptive-scheduler.md)
+- [Message queues](docs/message-queue.md)
+- [Huffman UART protocol](docs/huffman-uart.md)
+- [Timer ownership and tick rates](docs/timers.md)
 
-Guest runtime upload 只改 SRAM，不會重燒 AVR firmware，reset 或斷電後就消失。
-詳細的 slot 記憶體配置、`guest-riscv/src/main.c` 逐行說明、shell protocol 與
-guest-level preemption 請見 [`docs/os-guide.md`](docs/os-guide.md) 最後一章。
-
-## 下一步
-
-目前 event flags、UART shell、stack guard、kernel panic、software reboot
-與 software timer service 已可運作。接下來可選擇處理 task lifecycle，或沿
-SD card + bytecode VM 路線實作可載入 task。詳細路線放在 `docs/os-guide.md`。
+This is an educational RTOS and emulator, not a production or safety-critical
+operating system.
