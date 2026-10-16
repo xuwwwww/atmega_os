@@ -20,6 +20,8 @@ void rv_demo_set_switch_trace(uint8_t enabled);
 uint8_t rv_demo_switch_trace_enabled(void);
 uint8_t rv_demo_slot_count(void);
 uint8_t rv_demo_slot_loaded(uint8_t slot);
+int8_t rv_demo_find_name(const char *name);
+uint16_t rv_demo_storage_bytes(void);
 const char *rv_demo_slot_name(uint8_t slot);
 uint8_t rv_demo_slot_priority(uint8_t slot);
 uint16_t rv_demo_slot_image_size(uint8_t slot);

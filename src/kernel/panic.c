@@ -56,8 +56,9 @@ uint8_t kernel_last_panic(uint8_t *code, uint8_t *detail)
 }
 
 #if LGT_SAFE_MODE
-/* Safe mode keeps SREG.I clear, so reaching any hardware vector is itself a
- * kernel invariant violation.  Never RET from an unexplained LGT vector:
+/* Most safe-mode vectors remain forbidden. The stable Uno profile may enable
+ * the UART RX vector, and node profiles own their timer/TWI vectors. Never
+ * RET from an unexplained LGT vector:
  * some clone paths may jump here without pushing a valid return PC, in which
  * case RET consumes ordinary C stack bytes and sends control flow anywhere. */
 #define IGNORE_VECTOR(number)                                               \
@@ -87,7 +88,9 @@ IGNORE_VECTOR(14)
 IGNORE_VECTOR(15)
 IGNORE_VECTOR(16)
 IGNORE_VECTOR(17)
+#if !UART_RX_INTERRUPT
 IGNORE_VECTOR(18)
+#endif
 IGNORE_VECTOR(19)
 IGNORE_VECTOR(20)
 IGNORE_VECTOR(21)

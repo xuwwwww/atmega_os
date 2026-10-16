@@ -2,7 +2,9 @@
 """Relay a WSL terminal to the Windows COM-port monitor without Console buffering."""
 
 import argparse
+import glob
 import os
+import re
 import selectors
 import subprocess
 import sys
@@ -19,6 +21,238 @@ FRAME_COMPRESSED = 0x01
 FRAME_STACK_REPORT = 0x02
 FRAME_SHELL_TEXT = 0x03
 FRAME_PANIC = 0x04
+
+BINARY_GUEST_CHUNK_SIZE = 16
+BINARY_SYNC = b"\xa5\x5a"
+BINARY_OP_DATA = 1
+BINARY_OP_COMMIT = 2
+
+
+def crc16_ccitt(data):
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            crc = (((crc << 1) ^ 0x1021) & 0xFFFF
+                   if crc & 0x8000 else (crc << 1) & 0xFFFF)
+    return crc
+
+
+def binary_guest_packet(operation, offset=0, payload=b""):
+    body = bytes([
+        operation, offset & 0xFF, (offset >> 8) & 0xFF, len(payload)
+    ]) + payload
+    crc = crc16_ccitt(body)
+    return BINARY_SYNC + body + bytes([crc & 0xFF, crc >> 8])
+
+
+class DemandGuestLoader:
+    """Serve PC-resident guest images requested by the Uno shell."""
+
+    RUN_REQUEST = re.compile(rb"HOST RUN ([a-z0-9_-]{1,11}) ([0-3])")
+
+    def __init__(self, process, guest_dirs, timeout=3.0, retries=5):
+        self.process = process
+        self.guest_dirs = guest_dirs
+        self.timeout = timeout
+        self.retries = retries
+        self.buffer = bytearray()
+        self.state = "idle"
+        self.name = None
+        self.priority = 2
+        self.image = b""
+        self.image_crc = 0
+        self.offset = 0
+        self.chunk_end = 0
+        self.packet = b""
+        self.attempt = 0
+        self.deadline = 0.0
+        self.quiet_protocol = False
+        self.quiet_buffer = bytearray()
+
+    @property
+    def busy(self):
+        return self.state != "idle"
+
+    def _send(self, data):
+        self.process.stdin.write(data)
+        self.process.stdin.flush()
+
+    def _find_image(self, name):
+        for directory in self.guest_dirs:
+            path = os.path.join(directory, name + ".bin")
+            if os.path.isfile(path):
+                return path
+        return None
+
+    def _print_library(self):
+        images = {}
+        for directory in self.guest_dirs:
+            for path in glob.glob(os.path.join(directory, "*.bin")):
+                images.setdefault(os.path.splitext(os.path.basename(path))[0], path)
+        if not images:
+            print("[host library] empty; run: make guest-library "
+                  "GUEST_CS='guest-riscv/workloads/*.c'")
+        else:
+            print("[host library] PC-backed RV32 images:")
+            for name in sorted(images):
+                print(f"  {name:<11} {os.path.getsize(images[name])} bytes")
+        sys.stdout.flush()
+
+    def _fail(self, message):
+        print(f"\n[host load failed] {message}")
+        sys.stdout.flush()
+        self.state = "idle"
+        self.quiet_protocol = False
+        self.quiet_buffer.clear()
+        self.buffer.clear()
+
+    def _start(self, name, priority):
+        path = self._find_image(name)
+        if path is None:
+            self._fail(
+                f"{name}.bin is not in {', '.join(self.guest_dirs)}; "
+                "build it with make guest-library"
+            )
+            return
+        with open(path, "rb") as guest_file:
+            image = guest_file.read()
+        if not 1 <= len(image) <= 192:
+            self._fail(f"{path} is {len(image)} bytes; capacity is 1..192")
+            return
+
+        self.name = name
+        self.priority = priority
+        self.image = image
+        self.image_crc = crc16_ccitt(image)
+        self.offset = 0
+        self.attempt = 0
+        self.buffer.clear()
+        self.state = "ready"
+        self.quiet_protocol = True
+        self.quiet_buffer.clear()
+        self.deadline = time.monotonic() + self.timeout
+        print(f"[loading {name}] 0/{len(image)} bytes (0%) from PC to Uno")
+        sys.stdout.flush()
+        self._send(
+            f"guest bload {name} {len(image)} {self.image_crc:04x} 0\r".encode(
+                "ascii"
+            )
+        )
+
+    def _send_chunk(self):
+        chunk = self.image[
+            self.offset:self.offset + BINARY_GUEST_CHUNK_SIZE
+        ]
+        self.chunk_end = self.offset + len(chunk)
+        self.packet = binary_guest_packet(BINARY_OP_DATA, self.offset, chunk)
+        self.attempt = 1
+        self.state = "ack"
+        self.deadline = time.monotonic() + self.timeout
+        self.buffer.clear()
+        self._send(self.packet)
+
+    def _retry_packet(self, reason):
+        if self.attempt >= self.retries:
+            self._fail(f"{reason}; retry limit reached at byte {self.offset}")
+            return
+        self.attempt += 1
+        self.deadline = time.monotonic() + self.timeout
+        self.buffer.clear()
+        print(f"[loading {self.name}] retry {self.attempt}/{self.retries} "
+              f"at byte {self.offset}")
+        sys.stdout.flush()
+        self._send(self.packet)
+
+    def feed(self, decoded):
+        self.buffer.extend(decoded)
+        if len(self.buffer) > 8192:
+            del self.buffer[:-4096]
+
+        if self.state == "idle":
+            if b"HOST LIST" in self.buffer:
+                marker_end = self.buffer.index(b"HOST LIST") + len(b"HOST LIST")
+                del self.buffer[:marker_end]
+                self._print_library()
+            match = self.RUN_REQUEST.search(self.buffer)
+            if match:
+                name = match.group(1).decode("ascii")
+                priority = int(match.group(2))
+                self._start(name, priority)
+            return
+
+        if b"ATmega OS" in self.buffer:
+            self._fail("Uno rebooted during the transfer")
+            return
+        if self.state == "ready":
+            expected = (f"READY name={self.name} size={len(self.image)} "
+                        "chunk=16 encoding=binary").encode("ascii")
+            if expected in self.buffer:
+                self._send_chunk()
+            elif b"LOAD ERROR" in self.buffer:
+                self._fail("Uno rejected the load session")
+            return
+
+        if self.state == "ack":
+            expected_crc = crc16_ccitt(self.image[:self.chunk_end])
+            expected = (f"BINARY ACK bytes={self.chunk_end} "
+                        f"crc={expected_crc:04x}").encode("ascii")
+            if expected in self.buffer:
+                self.offset = self.chunk_end
+                percent = self.offset * 100 // len(self.image)
+                print(f"[loading {self.name}] {self.offset}/{len(self.image)} "
+                      f"bytes ({percent}%)")
+                sys.stdout.flush()
+                if self.offset < len(self.image):
+                    self._send_chunk()
+                else:
+                    self.packet = binary_guest_packet(BINARY_OP_COMMIT)
+                    self.attempt = 1
+                    self.state = "commit"
+                    self.deadline = time.monotonic() + self.timeout
+                    self.buffer.clear()
+                    self._send(self.packet)
+            elif b"BINARY NACK" in self.buffer:
+                self._retry_packet("Uno returned NACK")
+            return
+
+        if self.state == "commit":
+            if b"LOAD OK" in self.buffer:
+                print(f"[loading {self.name}] complete; starting Uno VM")
+                sys.stdout.flush()
+                command = f"run-cached {self.name} {self.priority}\r"
+                self.state = "idle"
+                self.buffer.clear()
+                self._send(command.encode("ascii"))
+            elif b"LOAD ERROR" in self.buffer or b"BINARY NACK" in self.buffer:
+                self._retry_packet("Uno rejected commit")
+
+    def visible_output(self, decoded):
+        """Hide loader protocol chatter while preserving progress and VM text."""
+        if self.quiet_protocol:
+            self.quiet_buffer.extend(decoded)
+            marker = b"[RUNNING]"
+            position = self.quiet_buffer.find(marker)
+            if position < 0:
+                if len(self.quiet_buffer) > 4096:
+                    del self.quiet_buffer[:-512]
+                return b""
+            visible = bytes(self.quiet_buffer[position:])
+            self.quiet_buffer.clear()
+            self.quiet_protocol = False
+            return visible
+
+        # HOST LIST is a firmware-to-monitor control request, not user output.
+        decoded = decoded.replace(b"HOST LIST\r\n", b"")
+        return self.RUN_REQUEST.sub(b"", decoded)
+
+    def poll(self):
+        if not self.busy or time.monotonic() < self.deadline:
+            return
+        if self.state == "ack" or self.state == "commit":
+            self._retry_packet("UART response timeout")
+        else:
+            self._fail("timed out waiting for Uno loader")
 
 
 class TerminalInputFilter:
@@ -265,6 +499,10 @@ def parse_args():
     parser.add_argument("--script", required=True)
     parser.add_argument("--port", default="COM6")
     parser.add_argument("--baud", type=int, default=115200)
+    parser.add_argument(
+        "--guest-dir", action="append", default=[],
+        help="directory containing PC-backed NAME.bin guest images",
+    )
     parser.add_argument("--reset", action="store_true")
     return parser.parse_args()
 
@@ -295,6 +533,8 @@ def main():
         stderr=subprocess.STDOUT,
         bufsize=0,
     )
+    guest_dirs = [os.path.abspath(path) for path in args.guest_dir]
+    demand_loader = DemandGuestLoader(process, guest_dirs)
 
     stdin_fd = sys.stdin.fileno()
     stdout_fd = process.stdout.fileno()
@@ -321,6 +561,7 @@ def main():
             tty.setcbreak(stdin_fd)
 
         while process.poll() is None:
+            demand_loader.poll()
             if not prompt_requested and time.monotonic() >= prompt_deadline:
                 process.stdin.write(b"\r")
                 process.stdin.flush()
@@ -332,7 +573,10 @@ def main():
                         return process.wait()
                     decoded = decoder.feed(data)
                     if decoded:
-                        os.write(sys.stdout.fileno(), decoded)
+                        demand_loader.feed(decoded)
+                        visible = demand_loader.visible_output(decoded)
+                        if visible:
+                            os.write(sys.stdout.fileno(), visible)
                     continue
 
                 data = os.read(stdin_fd, 256)
@@ -351,8 +595,14 @@ def main():
 
                 filtered = input_filter.feed(data)
                 if filtered:
-                    process.stdin.write(filtered)
-                    process.stdin.flush()
+                    if demand_loader.busy:
+                        os.write(
+                            sys.stdout.fileno(),
+                            b"\r\n[host loader busy; input ignored]\r\n",
+                        )
+                    else:
+                        process.stdin.write(filtered)
+                        process.stdin.flush()
 
         return process.returncode
     except KeyboardInterrupt:

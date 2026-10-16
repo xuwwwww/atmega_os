@@ -11,6 +11,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--repo", required=True)
     parser.add_argument("--sources", nargs="+", required=True)
+    parser.add_argument(
+        "--build-only", action="store_true",
+        help="keep images in the PC build directory for demand loading",
+    )
     args = parser.parse_args()
 
     repo = os.path.abspath(args.repo)
@@ -22,7 +26,7 @@ def main():
 
     if not selected:
         raise SystemExit("no guest C source selected")
-    if len(selected) > 3:
+    if not args.build_only and len(selected) > 3:
         raise SystemExit(
             f"selected {len(selected)} guests, but this Uno build has three "
             "resident VM slots"
@@ -51,6 +55,12 @@ def main():
         )
         binary = os.path.join(repo, "guest-riscv", "build", f"{name}.bin")
         guests.append((name, binary))
+
+    if args.build_only:
+        print("PC guest library: " + ", ".join(
+            os.path.splitext(os.path.basename(path))[0] for path in selected
+        ))
+        return
 
     command = [
         "make", "-C", repo, "guest-load-batch",

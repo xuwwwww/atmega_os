@@ -153,6 +153,11 @@ int main(void)
 #if LGT_SAFE_MODE
     /* Do not load an artificial return frame on this LGT8F-compatible core.
      * Continue on the reset-created main stack for the entire safe-mode run. */
+#if UART_RX_INTERRUPT
+    /* The stable Uno uses the UART RX ISR even in the single-stack profile.
+     * No scheduler call is made by that ISR; it only fills the byte ring. */
+    sei();
+#endif
     lgt_supervisor_task();
     __builtin_unreachable();
 #else

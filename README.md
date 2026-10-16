@@ -7,32 +7,33 @@ ATmega328P-compatible boards. It combines three related experiments:
 - a small RV32I interpreter that runs freestanding RISC-V guests from SRAM;
 - a two-board distributed profile in which an Uno coordinates a Nano over I2C.
 
-The current hardware setup uses a genuine Uno on `COM5` as the coordinator and
-a Nano on `COM9` as the worker. Connect A4/SDA to A4/SDA, A5/SCL to A5/SCL,
-and GND to GND. Each board remains powered by its own USB cable.
+The primary profile uses a genuine Uno on `COM5`. Guest binaries remain on the
+PC and the monitor loads one requested image into the Uno's single SRAM cache
+before the Uno executes it. The earlier Uno/Nano I2C distributed profile is
+still available as a separate build.
 
-## Quick start: two-node profile
+## Quick start: PC-backed Uno
 
 ```bash
-make nodes-upload
-make guests-uno GUEST_CS='guest-riscv/workloads/*.c'
+make guest-library GUEST_CS='guest-riscv/workloads/*.c'
+make upload PORT=COM5
 make monitor PORT=COM5
 ```
 
-The coordinator presents a small Unix-style shell:
+At the `os$` shell:
 
 ```text
-uno$ ls
-uno$ run checksum
-uno$ jobs
-uno$ kill
-uno$ man run
+os$ ls
+os$ run checksum
+os$ mem
 ```
 
 `guest-riscv/` is a Git submodule containing the freestanding guest sources.
-The PC cross compiler produces an RV32I image no larger than 192 bytes. The
-uploader stores named images in Uno SRAM; the Uno deploys a selected image over
-I2C, and the Nano interprets it.
+The PC cross compiler produces RV32I images no larger than 192 bytes. `ls`
+lists the PC library. `run NAME` demand-loads that image in CRC-protected
+16-byte chunks, displays progress, and starts the Uno VM automatically. A new
+run replaces the previous SRAM image, so the PC library is not limited to the
+AVR slot count.
 
 Clone both repositories with:
 
@@ -65,6 +66,8 @@ git clone --recurse-submodules https://github.com/xuwwwww/atmega_os.git
 - host-side decoding in the Python monitor;
 - command history maintained on the PC;
 - role-aware `uno$`, `nano$`, and `os$` prompts.
+- a 1,000,000-baud application link on the reference Uno;
+- PC-backed demand loading with visible byte/percentage progress.
 
 ### RV32I and distributed execution
 
@@ -141,8 +144,10 @@ make upload PORT=COM5
 make monitor PORT=COM5
 ```
 
-Bootloader upload uses 115200 baud. The application UART uses 4800 baud. Exit
-the monitor with `Ctrl+]` or `Ctrl+C`.
+Bootloader upload uses 115200 baud. The reference Uno application UART uses
+1,000,000 baud with `U2X=1` and `UBRR=1`, which has zero divider error at
+16 MHz. Its interrupt-driven RX path was validated with complete CRC-checked
+guest transfers. Exit the monitor with `Ctrl+]` or `Ctrl+C`.
 
 For the distributed profiles:
 
@@ -155,23 +160,33 @@ make nodes-upload
 Windows may reassign a COM number after reconnecting a board. Override the
 corresponding Make variable rather than editing the Makefile.
 
-## Build and load guests
+## Build the PC guest library
 
-Build one selected C file and upload only its SRAM image:
-
-```bash
-make guest-uno GUEST_C=guest-riscv/workloads/checksum.c
-```
-
-Build and load multiple independent images through one serial connection:
+Build one selected C file without occupying Uno SRAM:
 
 ```bash
-make guests-uno GUEST_CS='guest-riscv/workloads/*.c'
+make guest-build GUEST_C=guest-riscv/workloads/checksum.c
 ```
 
-Runtime upload does not rewrite AVR flash. Uploaded images disappear when the
-Uno resets or loses power. A Nano cache is also volatile; the Uno redeploys a
-missing or mismatched image on the next `run` command.
+Build any number of selected images into `guest-riscv/build/`:
+
+```bash
+make guest-library GUEST_CS='guest-riscv/workloads/*.c'
+```
+
+Keep `make monitor` running, then use `run NAME`. The monitor performs the
+binary transfer through the same open serial connection. The Uno retains only
+one 376-byte VM slot; the next run evicts it. `mem` reports linked static SRAM,
+the current stack/data gap, slot count, and VM storage size.
+
+## Optional two-node profile
+
+Connect Uno A4/SDA to Nano A4/SDA, A5/SCL to A5/SCL, and GND to GND. Each board
+remains powered by its own USB cable. Build and flash with:
+
+```bash
+make nodes-upload NODE_MASTER_PORT=COM5 NODE_WORKER_PORT=COM9
+```
 
 ## Tests
 

@@ -52,21 +52,25 @@ From the repository root:
 
 ```sh
 cd /mnt/d/atmega_os
-make nodes-upload
-make guests-uno GUEST_CS='guest-riscv/workloads/*.c'
+make guest-library GUEST_CS='guest-riscv/workloads/*.c'
+make upload PORT=COM5
 make monitor PORT=COM5
 ```
 
 After the monitor prints the prompt:
 
 ```text
-uno$ status
-uno$ ls
-uno$ run checksum
-uno$ jobs
+os$ ls
+os$ run checksum
+os$ mem
 ```
 
-The first command flashes both boards. The second compiles each selected RISC-V C file and uploads only the images into Uno SRAM. `run checksum` automatically deploys the image to Nano if Nano does not already have the exact name, size, and CRC.
+The first command builds an unlimited PC-side library in `guest-riscv/build/`.
+The second flashes the one-slot local Uno firmware. When `run checksum` is
+entered, the monitor reads `checksum.bin`, loads it in CRC-protected chunks,
+shows byte and percentage progress, and starts the RV32I VM on the Uno. The
+next run replaces the SRAM slot. The separate two-board profile remains
+available through `make nodes-upload`.
 
 ## 5. Shell operation
 
@@ -82,18 +86,16 @@ Type a command and press Enter. The PC monitor handles local echo and command hi
 
 ```text
 help                 concise command summary
-man                  available manual topics
-man run              detailed run syntax
-status               friendly I2C link status
-ls                   programs on Uno and whether Nano has each image
-run NAME             execute one program on Nano
-run NAME high        execute it with explicit job priority
-jobs                 active job plus recent completed results
-kill                 cancel the active job or automatic batch
-results              completed-result history
-load                 show the PC commands used to add programs
+ls                   images in the PC build library
+run NAME             demand-load and execute one image on Uno
+run NAME high        load it with an explicit VM priority
+mem                  SRAM/static/current-stack-gap report
+history              PC-side command history
 clear                clear the terminal
 ```
+
+The commands above describe the primary local profile. `uno$` adds distributed
+commands such as `status`, `jobs`, `kill`, `results`, and `run --all`.
 
 ### Batch and diagnostic commands
 
@@ -206,7 +208,13 @@ Start the coordinator monitor with:
 make monitor PORT=COM5
 ```
 
-The bootloader normally uses 115200 baud; the application monitor currently uses 4800 baud. These are separate protocols and do not need to match.
+The bootloader uses 115200 baud. The reference Uno application uses 1,000,000
+baud. At 16 MHz with double-speed UART, `UBRR=1` produces that rate with zero
+divider error. Safe mode now uses a small RX ISR to fill the 32-byte ring;
+millisecond polling was unable to receive high-speed command bursts. Binary
+loads use 16-byte payloads so a complete packet fits in that ring while CRC is
+being calculated. The faulty clone can still be built at 4800 baud with its RX
+interrupt disabled.
 
 Exit with `Ctrl+]` or `Ctrl+C`. Opening a serial port can toggle DTR and reset an Arduino. Batch upload keeps one connection open so multiple images do not cause repeated resets.
 
@@ -329,19 +337,14 @@ Inspect its assembly and ELF metadata:
 make guest-inspect GUEST_C=guest-riscv/workloads/checksum.c
 ```
 
-Upload only that guest to Uno SRAM:
+Build any number of guests into the PC backing store:
 
 ```sh
-make guest-uno GUEST_C=guest-riscv/workloads/checksum.c
+make guest-library GUEST_CS='guest-riscv/workloads/*.c'
 ```
 
-Upload a selected group:
-
-```sh
-make guests-uno GUEST_CS='guest-riscv/workloads/*.c'
-```
-
-These runtime-only targets do not call AVRDUDE and do not replace AVR Flash. The images disappear when Uno resets or loses power.
+This target neither calls AVRDUDE nor consumes Uno SRAM. `make monitor` is the
+backing-store server. It loads only the image named by a later shell `run`.
 
 ### Writing another guest
 
@@ -364,16 +367,16 @@ int main(void)
 Then run on the PC:
 
 ```sh
-make guest-uno GUEST_C=guest-riscv/workloads/counter.c
+make guest-library GUEST_CS=guest-riscv/workloads/counter.c
 make monitor PORT=COM5
 ```
 
-And at `uno$`:
+And at `os$`:
 
 ```text
 ls
 run counter
-jobs
+mem
 ```
 
 Guest C is freestanding. There is no `printf`, heap, file system, operating-system process API, or normal C library. Keep code and data within the 192-byte image/memory constraint.
@@ -390,7 +393,10 @@ You normally write C or assembly and let the toolchain create ELF. Hand-writing 
 
 The PC uploader opens the shell connection, starts a named load session, then sends binary chunks. Every chunk carries position and integrity information. Uno acknowledges accepted progress; the PC retries lost or damaged transfers.
 
-The current chunk size is 48 bytes. The completed image directory records:
+The current high-speed chunk size is 16 bytes. Each packet has an absolute
+offset and CRC; the host waits for an ACK before sending the next packet. The
+monitor displays confirmed progress rather than merely bytes attempted. The
+resident slot records:
 
 - name;
 - byte size;
@@ -398,7 +404,16 @@ The current chunk size is 48 bytes. The completed image directory records:
 - scheduling priority;
 - entry point.
 
-The loader does not write EEPROM or AVR Flash. This makes iteration faster and avoids flash wear, but every reset clears the uploaded library.
+The loader does not write EEPROM or AVR Flash. The PC library survives an Uno
+reset, while the single resident cache does not. A subsequent `run` simply
+loads the requested image again.
+
+The one-slot local build currently links 613 bytes of static SRAM, leaving
+1,435 bytes between linked data and the top of the 2 KiB SRAM before runtime
+stack use. The slot itself is 376 bytes. Earlier three-slot coordinator builds
+linked 1,569 bytes of static SRAM. The `mem` command reports the linked static
+region and the live SP-to-data gap, and the build fails if the configured
+minimum runtime reserve is violated.
 
 Huffman text frames and binary loader frames are different protocols. Both are decoded incrementally because Windows serial reads may split a frame anywhere.
 

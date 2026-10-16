@@ -21,6 +21,10 @@
 #define UART_BAUD 4800UL
 #endif
 
+#ifndef UART_RX_INTERRUPT
+#define UART_RX_INTERRUPT 1
+#endif
+
 #define UART_UBRR ((F_CPU / (8UL * UART_BAUD)) - 1UL)
 #define UART_RX_BUFFER_SIZE 32u
 #define UART_TX_BUFFER_SIZE 32u
@@ -54,6 +58,7 @@ static mutex_t tx_mutex;
 #if LGT_SAFE_MODE
 static void uart_poll_receive(void)
 {
+#if !UART_RX_INTERRUPT
     /* Some LGT8F-compatible bootloaders leave their watchdog path running
      * even after avr-libc's ATmega328P disable sequence.  Safe mode polls the
      * UART instead of returning to an interrupt-driven scheduler, so this is
@@ -90,6 +95,7 @@ static void uart_poll_receive(void)
             rx_head = next_head;
         }
     }
+#endif
 }
 #endif
 
@@ -181,7 +187,7 @@ void uart_init(void)
 
     UCSR0A = (1u << U2X0);
     UCSR0B = (1u << RXEN0) | (1u << TXEN0)
-#if !LGT_SAFE_MODE
+#if !LGT_SAFE_MODE || UART_RX_INTERRUPT
              | (1u << RXCIE0)
 #endif
         ;
@@ -309,7 +315,8 @@ void uart_read_char_wait(char *out)
 {
 #if LGT_SAFE_MODE
     /* There is intentionally no second native task to schedule while the
-     * shell waits. Poll the UART once per millisecond with interrupts off. */
+     * shell waits. The optional RX ISR fills the ring; the legacy clone
+     * profile instead polls when UART_RX_INTERRUPT=0. */
     while (!uart_read_char(out))
     {
         timer_delay_ms(1u);
@@ -401,7 +408,7 @@ void uart_panic_write(uint8_t code, uint8_t detail)
     }
 }
 
-#if !LGT_SAFE_MODE
+#if !LGT_SAFE_MODE || UART_RX_INTERRUPT
 ISR(USART0_RX_vect)
 {
     uint8_t received = UDR0;
@@ -415,9 +422,14 @@ ISR(USART0_RX_vect)
 
     rx_buffer[rx_head] = received;
     rx_head = next_head;
+#if !LGT_SAFE_MODE
     semaphore_give_from_isr(&rx_available);
+#endif
 }
 
+#endif
+
+#if !LGT_SAFE_MODE
 ISR(USART0_UDRE_vect)
 {
     if (tx_tail == tx_head)

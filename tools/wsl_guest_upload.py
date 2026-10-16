@@ -10,7 +10,7 @@ import time
 
 from wsl_serial_monitor import SerialDecoder
 
-BINARY_GUEST_CHUNK_SIZE = 48
+BINARY_GUEST_CHUNK_SIZE = 16
 BINARY_SYNC = b"\xa5\x5a"
 BINARY_OP_DATA = 1
 BINARY_OP_COMMIT = 2
@@ -232,7 +232,7 @@ def upload_image_binary(connection, image, crc, timeout, name, entry, retries):
     )
     expect_upload_result(
         connection,
-        f"READY name={name} size={len(image)} chunk=48 encoding=binary",
+        f"READY name={name} size={len(image)} chunk=16 encoding=binary",
         timeout,
     )
 

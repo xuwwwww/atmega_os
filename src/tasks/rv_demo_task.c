@@ -566,6 +566,19 @@ uint8_t rv_demo_slot_loaded(uint8_t index)
 {
     return slot_valid(index) && slots[index].uploaded_valid;
 }
+int8_t rv_demo_find_name(const char *name)
+{
+    for (uint8_t index = 0u; index < RV_DEMO_SLOT_COUNT; index++)
+    {
+        if (slots[index].uploaded_valid &&
+            strncmp(slots[index].name, name, RV_DEMO_NAME_CAPACITY) == 0)
+        {
+            return (int8_t)index;
+        }
+    }
+    return -1;
+}
+uint16_t rv_demo_storage_bytes(void) { return sizeof(slots); }
 const char *rv_demo_slot_name(uint8_t index)
 {
     return slot_valid(index) ? slots[index].name : "";

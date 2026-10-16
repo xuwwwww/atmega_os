@@ -23,10 +23,12 @@ SRC      := src/main.c \
 	 src/tasks/rv_demo_task.c \
 	 src/tasks/shell_task.c
 ASM_SRC  := src/kernel/context.S
-# The FIREPHX/LGT clone's USB-UART path corrupts occasional bytes at 9600.
-# 4800 has passed a complete three-image SRAM upload on the actual COM6 board;
-# the loader still checks every prefix CRC and retransmits damaged chunks.
-UART_BAUD ?= 4800UL
+# The stable Uno/Nano node pair uses the fastest exact standard rate that the
+# 16 MHz AVR UART can generate with U2X enabled: UBRR=1 gives 1,000,000 baud
+# with zero clock error.  The intentionally faulty LGT clone can still be
+# built explicitly with UART_BAUD=4800UL MONITOR_BAUD=4800.
+UART_BAUD ?= 1000000UL
+UART_RX_INTERRUPT ?= 1
 KERNEL_TICK_HZ ?= 2000UL
 # This project's Uno Type-C clone uses an LGT8F-compatible core.  Repeated
 # switching between private AVR stacks is not reliable on that chip, so the
@@ -40,8 +42,10 @@ SHELL_STACK_SIZE ?= 224
 TIMER_SERVICE_STACK_SIZE ?= 160
 IDLE_STACK_SIZE ?= 128
 RV_DEMO_STACK_SIZE ?= 128
-RV_GUEST_SLOT_COUNT ?= $(if $(filter 1,$(LGT_SAFE_MODE)),3,1)
-MONITOR_BAUD ?= 4800
+# The PC is the guest backing store. AVR SRAM holds only the image currently
+# being loaded or executed; the next demand load replaces this cache slot.
+RV_GUEST_SLOT_COUNT ?= 1
+MONITOR_BAUD ?= 1000000
 BUILD_DIR := build
 LOG_MANIFEST := tools/log_messages.json
 LOG_GENERATOR := tools/generate_log_codec.py
@@ -53,6 +57,7 @@ RV_GUEST_GENERATOR := tools/generate_guest_image.py
 RV_GUEST_C := src/generated/rv_guest_image.c
 RV_GUEST_H := src/generated/rv_guest_image.h
 RV_GUEST_CAPACITY ?= 192
+SRAM_RUNTIME_RESERVE ?= 256
 
 # Use Microchip's official ATmega Device Family Pack installed on this machine.
 DFP_DIR      ?= /mnt/d/CodexHome/runtime/toolchains/Microchip.ATmega_DFP.3.6.299
@@ -68,6 +73,7 @@ WINDOWS_AVRDUDE ?= /mnt/c/Users/User/AppData/Local/Microsoft/WinGet/Packages/AVR
 WINDOWS_POWERSHELL ?= powershell.exe
 
 CFLAGS   := $(DEVICE_FLAGS) -std=gnu11 -Os -Wall -Wextra -ffunction-sections -fdata-sections -mmcu=$(MCU) -DF_CPU=$(F_CPU) -DUART_BAUD=$(UART_BAUD) -DKERNEL_TICK_HZ=$(KERNEL_TICK_HZ) \
+	-DUART_RX_INTERRUPT=$(UART_RX_INTERRUPT) \
 	-DLGT_SAFE_MODE=$(LGT_SAFE_MODE) \
 	-DLGT_SAFE_STACK_SIZE=$(LGT_SAFE_STACK_SIZE) \
 	-DLED_STACK_SIZE=$(LED_STACK_SIZE) \
@@ -123,7 +129,7 @@ HW_TEST_RUN_TIMEOUT ?= 120
 # readback support.
 AVRDUDE_WRITE_FLAGS ?= -V
 
-.PHONY: all clean size test test-codec test-event test-queue test-timer test-rv32i test-loader test-hardware-tool serial-close upload upload-wsl monitor monitor-reset guest-build guest-upload guest-run guest-inspect guest-selected-upload guest-only guests-only guest-uno guests-uno guest-help guest-load guest-load-batch guest-load-run guest2-build guest2-load guest-dual-run hw-test hw-test-flash
+.PHONY: all clean size test test-codec test-event test-queue test-timer test-rv32i test-loader test-demand-loader test-hardware-tool serial-close upload upload-wsl monitor monitor-reset guest-build guest-upload guest-run guest-inspect guest-selected-upload guest-library guest-only guests-only guest-uno guests-uno guest-help guest-load guest-load-batch guest-load-run guest2-build guest2-load guest-dual-run hw-test hw-test-flash
 
 all: $(HEX) size
 
@@ -164,6 +170,7 @@ $(HEX): $(ELF)
 
 size: $(ELF)
 	$(SIZE) --format=avr --mcu=$(MCU) $(ELF)
+	python3 tools/check_avr_sram.py $(ELF) --size-tool $(SIZE) --reserve $(SRAM_RUNTIME_RESERVE)
 
 test-codec: $(LOG_PY)
 	python3 tools/test_log_codec.py $(LOG_MANIFEST)
@@ -195,6 +202,9 @@ test-rv32i: | $(BUILD_DIR)
 test-loader:
 	python3 tools/test_guest_upload.py
 
+test-demand-loader:
+	python3 tools/test_demand_guest_loader.py
+
 test-hardware-tool:
 	python3 tools/test_hardware_regression.py
 
@@ -203,7 +213,7 @@ test-job-protocol: | $(BUILD_DIR)
 	cc -std=c11 -Wall -Wextra -Werror -Isrc/kernel tools/test_job_protocol.c src/kernel/job_protocol.c -o build/test_job_protocol
 	./build/test_job_protocol
 
-test: test-codec test-event test-queue test-timer test-rv32i test-loader test-hardware-tool test-job-protocol
+test: test-codec test-event test-queue test-timer test-rv32i test-loader test-demand-loader test-hardware-tool test-job-protocol
 
 serial-close:
 	@$(WINDOWS_POWERSHELL) -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(WINDOWS_SERIAL_CLOSE)" >/dev/null
@@ -216,10 +226,10 @@ upload-wsl: serial-close $(HEX)
 	$(AVRDUDE) $(AVRDUDE_WRITE_FLAGS) -c arduino -p $(AVR_PART) -P $(WSL_PORT) -b $(BAUD) -D -U flash:w:$(HEX):i
 
 monitor: serial-close $(LOG_PY)
-	python3 tools/wsl_serial_monitor.py --script "$(WINDOWS_MONITOR)" --port "$(PORT)" --baud $(MONITOR_BAUD)
+	python3 tools/wsl_serial_monitor.py --script "$(WINDOWS_MONITOR)" --port "$(PORT)" --baud $(MONITOR_BAUD) --guest-dir "$(abspath guest-riscv/build)"
 
 monitor-reset: serial-close $(LOG_PY)
-	python3 tools/wsl_serial_monitor.py --script "$(WINDOWS_MONITOR)" --port "$(PORT)" --baud $(MONITOR_BAUD) --reset
+	python3 tools/wsl_serial_monitor.py --script "$(WINDOWS_MONITOR)" --port "$(PORT)" --baud $(MONITOR_BAUD) --guest-dir "$(abspath guest-riscv/build)" --reset
 
 guest-load: serial-close $(GUEST_BIN) $(LOG_PY)
 	python3 tools/wsl_guest_upload.py --script "$(WINDOWS_MONITOR)" --port "$(PORT)" --baud $(MONITOR_BAUD) --input "$(GUEST_BIN)" --name "$(GUEST_NAME)" --entry $(GUEST_ENTRY) $(GUEST_RUN_FLAG) $(GUEST_UPLOAD_FLAGS)
@@ -249,6 +259,11 @@ guest-inspect:
 guest-selected-upload:
 	python3 tools/guest_batch.py --repo "$(CURDIR)" --sources $(GUEST_CS)
 
+# Compile any number of PC-backed guest images.  The interactive monitor loads
+# only the requested image into the one-slot Uno cache on demand.
+guest-library:
+	python3 tools/guest_batch.py --repo "$(CURDIR)" --sources $(GUEST_CS) --build-only
+
 # Explicit aliases for the common runtime-only workflow.  Neither target has
 # an AVR .hex prerequisite or invokes AVRDUDE: they compile RV32 code on the
 # PC and replace only the selected SRAM guest image(s) through the shell.
@@ -265,11 +280,12 @@ guests-uno: PORT=COM5
 guests-uno: guests-only
 
 guest-help:
-	@echo "one guest, SRAM only:  make guest-only GUEST_C=guest-riscv/workloads/fibonacci.c"
-	@echo "many guests, SRAM only: make guests-only GUEST_CS='guest-riscv/workloads/*.c'"
-	@echo "compile only:           make guest-build GUEST_C=guest-riscv/workloads/fibonacci.c"
-	@echo "run after upload:       make guest-run GUEST_C=guest-riscv/workloads/fibonacci.c"
-	@echo "AVR firmware flash:     make upload  (only when the OS itself changed)"
+	@echo "build PC library:       make guest-library GUEST_CS='guest-riscv/workloads/*.c'"
+	@echo "flash PC-backed Uno:    make upload PORT=COM5"
+	@echo "serve + run from shell: make monitor PORT=COM5; then type: run fibonacci"
+	@echo "one compile only:       make guest-build GUEST_C=guest-riscv/workloads/fibonacci.c"
+	@echo "legacy direct SRAM:     make guest-only GUEST_C=guest-riscv/workloads/fibonacci.c"
+	@echo "faulty clone fallback:  make upload PORT=COM6 UART_BAUD=4800UL UART_RX_INTERRUPT=0"
 	@echo "three-board SRAM test: make hw-test"
 	@echo "flash + three-board:   make hw-test-flash"
 
@@ -320,10 +336,10 @@ i2c-test-upload: serial-close i2c-test-build
 .PHONY: nodes-build nodes-master-build nodes-worker-build \
 	nodes-upload nodes-master-upload nodes-worker-upload
 nodes-master-build:
-	$(MAKE) BUILD_DIR=build/nodes-master TARGET=build/nodes-master/os NODE_ROLE=1 LGT_SAFE_MODE=1 all
+	$(MAKE) BUILD_DIR=build/nodes-master TARGET=build/nodes-master/os NODE_ROLE=1 LGT_SAFE_MODE=1 RV_GUEST_SLOT_COUNT=1 all
 
 nodes-worker-build:
-	$(MAKE) BUILD_DIR=build/nodes-worker TARGET=build/nodes-worker/os NODE_ROLE=2 LGT_SAFE_MODE=1 all
+	$(MAKE) BUILD_DIR=build/nodes-worker TARGET=build/nodes-worker/os NODE_ROLE=2 LGT_SAFE_MODE=1 RV_GUEST_SLOT_COUNT=1 all
 
 nodes-build:
 	$(MAKE) nodes-worker-build

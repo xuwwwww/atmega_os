@@ -10,11 +10,12 @@
 #include "rv_demo_task.h"
 
 #include <avr/pgmspace.h>
+#include <avr/io.h>
 #include <stdint.h>
 #include <string.h>
 
 #define SHELL_LINE_CAPACITY 64u
-#define BINARY_GUEST_DATA_BYTES 48u
+#define BINARY_GUEST_DATA_BYTES 16u
 #define BINARY_GUEST_SYNC_0 0xa5u
 #define BINARY_GUEST_SYNC_1 0x5au
 #define BINARY_GUEST_OP_DATA 1u
@@ -189,6 +190,32 @@ static void shell_send_about(char *buffer)
     buffer_append_u32(buffer, &length, F_CPU);
     buffer_append_P(buffer, &length, PSTR(" tick_hz="));
     buffer_append_u32(buffer, &length, KERNEL_TICK_HZ);
+    shell_send_text(buffer, length);
+}
+
+extern uint8_t _end;
+
+static void shell_send_memory(char *buffer)
+{
+    uint8_t length = 0u;
+    uint16_t static_end = (uint16_t)(uintptr_t)&_end;
+    uint16_t stack_pointer = SP;
+    uint16_t static_bytes = static_end > RAMSTART
+                                ? (uint16_t)(static_end - RAMSTART) : 0u;
+    uint16_t live_gap = stack_pointer > static_end
+                            ? (uint16_t)(stack_pointer - static_end) : 0u;
+
+    buffer_append_P(buffer, &length, PSTR("sram total=2048 static="));
+    buffer_append_u32(buffer, &length, static_bytes);
+    buffer_append_P(buffer, &length, PSTR(" live_gap="));
+    buffer_append_u32(buffer, &length, live_gap);
+    shell_send_text(buffer, length);
+
+    length = 0u;
+    buffer_append_P(buffer, &length, PSTR("guest_slots="));
+    buffer_append_u32(buffer, &length, rv_demo_slot_count());
+    buffer_append_P(buffer, &length, PSTR(" guest_storage="));
+    buffer_append_u32(buffer, &length, rv_demo_storage_bytes());
     shell_send_text(buffer, length);
 }
 
@@ -490,7 +517,9 @@ static void shell_start_guest_load(char *buffer, const char *name,
     int8_t slot;
 
     shell_cancel_guest_load();
-    slot = rv_demo_upload_begin_name(name, image_size);
+    /* A PC-backed build has one resident cache slot. Loading another image
+     * deliberately evicts the previous one once no VM is running. */
+    slot = rv_demo_upload_begin_cached(name, image_size);
     if (slot < 0)
     {
         buffer_append_P(buffer, &length,
@@ -513,7 +542,7 @@ static void shell_start_guest_load(char *buffer, const char *name,
     }
     buffer_append_P(buffer, &length, PSTR(" size="));
     buffer_append_u32(buffer, &length, image_size);
-    buffer_append_P(buffer, &length, PSTR(" chunk=48 encoding=binary"));
+    buffer_append_P(buffer, &length, PSTR(" chunk=16 encoding=binary"));
     shell_send_text(buffer, length);
 }
 
@@ -1001,7 +1030,15 @@ static void shell_process_line(char *line)
         *--end = '\0';
     }
 
-    if (NODE_ROLE == 1 && (strcmp_P(line, PSTR("ls")) == 0 ||
+    if (NODE_ROLE == 0 && (strcmp_P(line, PSTR("ls")) == 0 ||
+                           strcmp_P(line, PSTR("list")) == 0 ||
+                           strcmp_P(line, PSTR("library")) == 0))
+    {
+        /* The Python monitor recognizes this control line and prints the PC
+         * build directory. A plain terminal still reveals what is missing. */
+        SHELL_TEXT("HOST LIST");
+    }
+    else if (NODE_ROLE == 1 && (strcmp_P(line, PSTR("ls")) == 0 ||
                            strcmp_P(line, PSTR("list")) == 0))
     {
         SHELL_TEXT("PROGRAM       LOCATION");
@@ -1259,7 +1296,59 @@ static void shell_process_line(char *line)
             SHELL_TEXT("Shell remains interactive. Use kill to stop the job.");
         }
     }
-    else if (NODE_ROLE != 1 && strncmp_P(line, PSTR("run "), 4u) == 0)
+    else if (NODE_ROLE == 0 && strncmp_P(line, PSTR("run "), 4u) == 0)
+    {
+        const char *args = line + 4u;
+        char name[RV_DEMO_NAME_CAPACITY];
+        uint16_t priority = TASK_PRIORITY_NORMAL;
+        uint8_t valid = shell_parse_guest_name(&args, name);
+
+        if (valid && *args)
+        {
+            if (strcmp_P(args, PSTR("low")) == 0) priority = TASK_PRIORITY_LOW;
+            else if (strcmp_P(args, PSTR("normal")) == 0) priority = TASK_PRIORITY_NORMAL;
+            else if (strcmp_P(args, PSTR("high")) == 0) priority = TASK_PRIORITY_HIGH;
+            else valid = 0u;
+        }
+        if (!valid)
+        {
+            SHELL_TEXT("Use: run <name> [low|normal|high]");
+        }
+        else
+        {
+            uint8_t n = 0u;
+            buffer_append_P(line, &n, PSTR("HOST RUN "));
+            for (uint8_t i = 0u; name[i] != '\0'; i++)
+                buffer_append_char(line, &n, name[i]);
+            buffer_append_char(line, &n, ' ');
+            buffer_append_u32(line, &n, priority);
+            shell_send_text(line, n);
+        }
+    }
+    else if (NODE_ROLE == 0 && strncmp_P(line, PSTR("run-cached "), 11u) == 0)
+    {
+        const char *args = line + 11u;
+        char name[RV_DEMO_NAME_CAPACITY];
+        uint16_t priority = TASK_PRIORITY_NORMAL;
+        uint8_t valid = shell_parse_guest_name(&args, name);
+
+        if (valid && *args)
+            valid = shell_parse_decimal(&args, &priority) && priority <= 3u && !*args;
+        if (!valid || rv_demo_find_name(name) < 0)
+        {
+            SHELL_TEXT("[HOST ERROR] demanded image was not loaded");
+        }
+        else
+        {
+            (void)rv_demo_set_priority(name, (uint8_t)priority);
+            SHELL_TEXT("[RUNNING] Uno VM started. Press q to stop it.");
+            rv_demo_set_output_prefix(1u);
+            if (!rv_demo_run_name(name)) SHELL_TEXT("[FAILED] VM could not start.");
+            else if (rv_demo_was_cancelled()) SHELL_TEXT("[STOPPED] Program was interrupted.");
+            else SHELL_TEXT("[DONE] Program finished.");
+        }
+    }
+    else if (NODE_ROLE == 2 && strncmp_P(line, PSTR("run "), 4u) == 0)
     {
         const char *args = line + 4u;
         char name[RV_DEMO_NAME_CAPACITY];
@@ -1390,7 +1479,9 @@ static void shell_process_line(char *line)
                               LOG_SHELL_HELP_WORKER_BYTE_COUNT,
                               LOG_SHELL_HELP_WORKER_BIT_COUNT);
 #else
-        SHELL_TEXT("ATmega local shell: ls | run PROGRAM | history | clear");
+        SHELL_TEXT("ATmega PC-backed shell");
+        SHELL_TEXT("ls | run PROGRAM [low|normal|high] | history | clear");
+        SHELL_TEXT("Images stay on the PC and load into Uno SRAM on demand.");
 #endif
     }
     else if (strcmp_P(line, PSTR("load")) == 0 ||
@@ -1432,6 +1523,10 @@ static void shell_process_line(char *line)
     else if (strcmp_P(line, command_uptime) == 0)
     {
         shell_send_uptime(line);
+    }
+    else if (strcmp_P(line, PSTR("mem")) == 0)
+    {
+        shell_send_memory(line);
     }
     else if (strcmp_P(line, PSTR("ps")) == 0 ||
              strcmp_P(line, command_tasks) == 0)
