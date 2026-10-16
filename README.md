@@ -146,8 +146,9 @@ make monitor PORT=COM5
 
 Bootloader upload uses 115200 baud. The reference Uno application UART uses
 1,000,000 baud with `U2X=1` and `UBRR=1`, which has zero divider error at
-16 MHz. Its interrupt-driven RX path was validated with complete CRC-checked
-guest transfers. Exit the monitor with `Ctrl+]` or `Ctrl+C`.
+16 MHz. Its interrupt-driven RX path was validated with repeated complete
+CRC-checked guest transfers. The 2,000,000-baud hardware limit was not
+repeatably reliable. Exit the monitor with `Ctrl+]` or `Ctrl+C`.
 
 For the distributed profiles:
 

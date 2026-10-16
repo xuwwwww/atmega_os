@@ -23,10 +23,10 @@ SRC      := src/main.c \
 	 src/tasks/rv_demo_task.c \
 	 src/tasks/shell_task.c
 ASM_SRC  := src/kernel/context.S
-# The stable Uno/Nano node pair uses the fastest exact standard rate that the
-# 16 MHz AVR UART can generate with U2X enabled: UBRR=1 gives 1,000,000 baud
-# with zero clock error.  The intentionally faulty LGT clone can still be
-# built explicitly with UART_BAUD=4800UL MONITOR_BAUD=4800.
+# The reference Uno uses the fastest repeatably reliable tested rate: UBRR=1
+# gives 1,000,000 baud with zero divider error. UBRR=0 (2 Mbaud) completed one
+# image but corrupted the next load command, so it is intentionally rejected
+# as a default. The faulty LGT clone can still be built explicitly at 4800.
 UART_BAUD ?= 1000000UL
 UART_RX_INTERRUPT ?= 1
 KERNEL_TICK_HZ ?= 2000UL

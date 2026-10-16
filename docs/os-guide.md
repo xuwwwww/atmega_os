@@ -210,7 +210,9 @@ make monitor PORT=COM5
 
 The bootloader uses 115200 baud. The reference Uno application uses 1,000,000
 baud. At 16 MHz with double-speed UART, `UBRR=1` produces that rate with zero
-divider error. Safe mode now uses a small RX ISR to fill the 32-byte ring;
+divider error. The 2,000,000-baud hardware maximum completed one image but
+corrupted a subsequent load command, so 1,000,000 is the highest repeatably
+reliable measured setting. Safe mode now uses a small RX ISR to fill the 32-byte ring;
 millisecond polling was unable to receive high-speed command bursts. Binary
 loads use 16-byte payloads so a complete packet fits in that ring while CRC is
 being calculated. The faulty clone can still be built at 4800 baud with its RX
