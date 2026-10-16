@@ -3,6 +3,7 @@
 
 import argparse
 import glob
+import json
 import os
 import subprocess
 
@@ -57,9 +58,21 @@ def main():
         guests.append((name, binary))
 
     if args.build_only:
+        build_directory = os.path.join(repo, "guest-riscv", "build")
+        manifest_path = os.path.join(build_directory, "library.json")
+        manifest = {
+            "version": 1,
+            "images": {
+                name: os.path.basename(binary) for name, binary in guests
+            },
+        }
+        with open(manifest_path, "w", encoding="utf-8") as manifest_file:
+            json.dump(manifest, manifest_file, indent=2, sort_keys=True)
+            manifest_file.write("\n")
         print("PC guest library: " + ", ".join(
             os.path.splitext(os.path.basename(path))[0] for path in selected
         ))
+        print("library manifest: " + manifest_path)
         return
 
     command = [

@@ -3,6 +3,7 @@
 
 import argparse
 import glob
+import json
 import os
 import re
 import selectors
@@ -80,16 +81,41 @@ class DemandGuestLoader:
 
     def _find_image(self, name):
         for directory in self.guest_dirs:
+            manifest = self._read_manifest(directory)
+            if manifest is not None and name in manifest:
+                path = os.path.join(directory, manifest[name])
+                if os.path.isfile(path):
+                    return path
             path = os.path.join(directory, name + ".bin")
             if os.path.isfile(path):
                 return path
         return None
 
+    @staticmethod
+    def _read_manifest(directory):
+        path = os.path.join(directory, "library.json")
+        if not os.path.isfile(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as manifest_file:
+                document = json.load(manifest_file)
+            images = document.get("images")
+            return images if document.get("version") == 1 and isinstance(images, dict) else None
+        except (OSError, ValueError):
+            return None
+
     def _print_library(self):
         images = {}
         for directory in self.guest_dirs:
-            for path in glob.glob(os.path.join(directory, "*.bin")):
-                images.setdefault(os.path.splitext(os.path.basename(path))[0], path)
+            manifest = self._read_manifest(directory)
+            if manifest is not None:
+                for name, filename in manifest.items():
+                    path = os.path.join(directory, filename)
+                    if os.path.isfile(path):
+                        images.setdefault(name, path)
+            else:
+                for path in glob.glob(os.path.join(directory, "*.bin")):
+                    images.setdefault(os.path.splitext(os.path.basename(path))[0], path)
         if not images:
             print("[host library] empty; run: make guest-library "
                   "GUEST_CS='guest-riscv/workloads/*.c'")
